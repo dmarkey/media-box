@@ -105,6 +105,26 @@ The server speaks MCP over stdio. Point your client at:
 uvx --from git+https://github.com/dmarkey/media-box.git media-box-mcp
 ```
 
+## Important: MCP timeout configuration
+
+The `qbt_wait` tool blocks until a torrent finishes downloading, which can take up to 30 minutes. Most MCP clients have a default tool call timeout that is much shorter than this and will kill the connection before the download completes.
+
+**You must increase your MCP client's timeout** to at least 1800 seconds (30 minutes) for this server to work properly. How to do this depends on your client:
+
+- **Claude Code:** Set `"timeout"` in your MCP server config in `~/.claude/settings.json`:
+  ```json
+  {
+    "mcpServers": {
+      "media-box": {
+        "command": "uvx",
+        "args": ["--from", "git+https://github.com/dmarkey/media-box.git", "media-box-mcp"],
+        "timeout": 1800
+      }
+    }
+  }
+  ```
+- **Other clients:** Consult your client's documentation for how to set per-server or global tool call timeouts.
+
 ## Tools
 
 ### Jellyfin
