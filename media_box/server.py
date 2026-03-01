@@ -221,14 +221,14 @@ async def qbt_list(
             "size": format_size(t.get("size")),
             "progress": format_progress(t.get("progress", 0)),
             "state": STATE_MAP.get(t.get("state", ""), t.get("state", "")),
-            "hash": t.get("hash", "")[:12],
+            "hash": t.get("hash", ""),
         })
     return format_table(rows, [
         ("Name", "name", 0),
         ("Size", "size", 10),
         ("Progress", "progress", 28),
         ("State", "state", 12),
-        ("Hash", "hash", 12),
+        ("Hash", "hash", 40),
     ])
 
 
