@@ -123,7 +123,7 @@ uvx --from git+https://github.com/dmarkey/media-box.git media-box-mcp
 | `qbt_list` | List torrents with filters for name, tag, category, and state. "Completed" state includes seeding. |
 | `qbt_info` | Detailed torrent info — progress, speed, ETA, save path, file list |
 | `qbt_wait` | Block until a torrent completes, errors, or times out (default 30 min) |
-| `qbt_delete` | Delete one or more torrents, optionally removing downloaded files |
+| `qbt_delete` | Delete one or more torrents by hash, optionally removing downloaded files |
 
 ### Jackett
 

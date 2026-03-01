@@ -16,7 +16,7 @@ jellyfin_refresh(library_id?)            — refresh library/libraries
 qbt_list(filter?, tag?, category?, state?)  — list torrents. state "Completed" includes both finished and seeding torrents.
 qbt_info(query)                          — detailed torrent info: progress, speed, ETA, save path, files. query matches by hash prefix or name substring.
 qbt_wait(query, timeout?)               — BLOCKING: waits for torrent to complete/error/timeout (default 1800s / 30 min). query matches by hash prefix or name substring.
-qbt_delete(queries, delete_files?)       — delete one or more torrents. queries is a list of hashes (or prefixes) or name substrings.
+qbt_delete(hashes, delete_files?)        — delete one or more torrents by their full info hash.
 
 jackett_search(query, category?, limit?, sort?)  — search for torrents (category: "movies", "tv"; sort: "seeders", "size")
 jackett_add(ref, category?, tag?)        — add a search result to qBittorrent (ref format: "search_id:number")
