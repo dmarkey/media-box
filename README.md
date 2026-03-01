@@ -26,23 +26,6 @@ The server exposes 19 tools across five services. It ships with an `instructions
   - [Jackett](https://github.com/Jackett/Jackett) torrent indexer proxy
 - Internet access for [TVMaze](https://www.tvmaze.com/api) (public API, no key needed)
 
-## Installation
-
-```bash
-# Clone the repo
-git clone git@github.com:dmarkey/media-box.git
-cd media-box
-
-# Install with uv
-uv sync
-```
-
-Or install directly from the repo:
-
-```bash
-uv pip install git+https://github.com/dmarkey/media-box.git
-```
-
 ## Configuration
 
 Create a config file at `~/.config/media-box/config`:
@@ -78,64 +61,48 @@ The server translates paths automatically when communicating with qBittorrent.
 
 ## Running the MCP server
 
-The server communicates over stdio using the MCP protocol.
-
-### With uv (recommended)
+No installation required — `uvx` fetches and runs the server directly from GitHub.
 
 ```bash
-# Run directly from the project directory
-uv run media-box-mcp
-
-# Or run the module
-uv run python -m media_box.server
+uvx --from git+https://github.com/dmarkey/media-box.git media-box-mcp
 ```
 
-### With the mcp CLI
+### Claude Code
 
-```bash
-# stdio mode (default)
-uv run mcp run media_box/server.py
-
-# Launch the MCP Inspector for debugging
-uv run mcp dev media_box/server.py
-```
-
-### Connecting to Claude Code
-
-Add to your Claude Code MCP settings (`~/.claude/settings.json`):
+Add to `~/.claude/settings.json`:
 
 ```json
 {
   "mcpServers": {
     "media-box": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/media-box", "media-box-mcp"]
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/dmarkey/media-box.git", "media-box-mcp"]
     }
   }
 }
 ```
 
-### Connecting to Claude Desktop
+### Claude Desktop
 
-Add to your Claude Desktop config (`claude_desktop_config.json`):
+Add to `claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
     "media-box": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/media-box", "media-box-mcp"]
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/dmarkey/media-box.git", "media-box-mcp"]
     }
   }
 }
 ```
 
-### Connecting to any MCP client
+### Any MCP client
 
 The server speaks MCP over stdio. Point your client at:
 
 ```bash
-uv run --directory /path/to/media-box media-box-mcp
+uvx --from git+https://github.com/dmarkey/media-box.git media-box-mcp
 ```
 
 ## Tools
