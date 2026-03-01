@@ -24,7 +24,7 @@ from .mover import MEDIA_EXTENSIONS
 
 mcp = FastMCP(
     "media-box",
-    instructions=Path(__file__).parent.parent.joinpath("SKILL.md").read_text(),
+    instructions=Path(__file__).with_name("SKILL.md").read_text(),
 )
 
 # ---------------------------------------------------------------------------
