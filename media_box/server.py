@@ -359,13 +359,13 @@ async def qbt_wait(query: str, timeout: int = 1800) -> str:
                 f"[{friendly_state}]"
             )
 
-            if state in _DONE_STATES:
+            if state in _DONE_STATES and (ever_had_seeders or progress >= 1.0):
                 return f"Complete: {name} ({t_hash[:12]})\n{last_status}"
 
             if state in _ERROR_STATES:
                 return f"ERROR: {name} state={friendly_state} ({t_hash[:12]})\n{last_status}"
 
-            if elapsed >= _NO_SEEDERS_TIMEOUT and not ever_had_seeders:
+            if elapsed >= _NO_SEEDERS_TIMEOUT and not ever_had_seeders and progress < 1.0:
                 return (
                     f"DEAD TORRENT: {name} — no seeders connected after "
                     f"{_NO_SEEDERS_TIMEOUT // 60} minutes ({t_hash[:12]})\n{last_status}"
