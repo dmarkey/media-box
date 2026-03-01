@@ -132,20 +132,12 @@ async def jellyfin_episodes(series_id: str, season: Optional[int] = None) -> str
 
 
 @mcp.tool()
-async def jellyfin_refresh(library_id: Optional[str] = None) -> str:
-    """Trigger a Jellyfin library metadata refresh.
-
-    Args:
-        library_id: Refresh a specific library. Omit to refresh all libraries.
-    """
+async def jellyfin_refresh() -> str:
+    """Trigger a Jellyfin library scan to detect newly added or removed files."""
     url, key = _jellyfin_config()
     async with JellyfinClient(url, key) as client:
-        if library_id:
-            await client.refresh_library(library_id)
-            return f"Refreshed library {library_id}"
-        else:
-            await client.refresh_all_libraries()
-            return "Refreshed all libraries"
+        await client.scan_library()
+    return "Library scan triggered"
 
 
 # ---------------------------------------------------------------------------

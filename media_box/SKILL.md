@@ -11,7 +11,7 @@ You have access to the `media-box` MCP tools for managing media across Jellyfin,
 jellyfin_search(query, type?)            — search Jellyfin library (type: "movie", "series", "episode")
 jellyfin_libraries()                     — list media libraries
 jellyfin_episodes(series_id, season?)    — list episodes for a series
-jellyfin_refresh(library_id?)            — refresh library/libraries
+jellyfin_refresh()                       — trigger a library scan to detect new/removed files
 
 qbt_list(filter?, tag?, category?, state?)  — list torrents. state "Completed" includes both finished and seeding torrents.
 qbt_info(query)                          — detailed torrent info: progress, speed, ETA, save path, files. query matches by hash prefix or name substring.

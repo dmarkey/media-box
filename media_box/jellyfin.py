@@ -77,22 +77,10 @@ class JellyfinClient:
             ]
         return items
 
-    async def refresh_library(self, library_id: str) -> None:
-        url = f"{self.base_url}/Items/{library_id}/Refresh"
-        params = {
-            "metadataRefreshMode": "FullRefresh",
-            "imageRefreshMode": "FullRefresh",
-            "replaceAllImages": "false",
-            "refreshItem": "true",
-        }
-        async with self.session.post(url, params=params) as r:
+    async def scan_library(self) -> None:
+        """Trigger a library scan to detect new/removed files."""
+        url = f"{self.base_url}/Library/Refresh"
+        async with self.session.post(url) as r:
             r.raise_for_status()
-
-    async def refresh_all_libraries(self) -> None:
-        libraries = await self.get_libraries()
-        for lib in libraries:
-            lid = lib.get("Id")
-            if lid:
-                await self.refresh_library(lid)
 
 

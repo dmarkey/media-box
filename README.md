@@ -134,7 +134,7 @@ The `qbt_wait` tool blocks until a torrent finishes downloading, which can take 
 | `jellyfin_search` | Search the media library by name, with optional type filter (movie/series/episode) |
 | `jellyfin_libraries` | List all media libraries |
 | `jellyfin_episodes` | List episodes for a series, with optional season filter |
-| `jellyfin_refresh` | Trigger a metadata refresh for one or all libraries |
+| `jellyfin_refresh` | Trigger a library scan to detect new/removed files |
 
 ### qBittorrent
 
