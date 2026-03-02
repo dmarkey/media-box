@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import secrets
 import tempfile
 from pathlib import Path
@@ -155,6 +156,21 @@ def _format_eta(seconds: int) -> str:
     if m:
         return f"{m}m {s}s"
     return f"{s}s"
+
+
+def _hash_from_magnet(magnet: str) -> Optional[str]:
+    """Extract the info hash from a magnet URI."""
+    m = re.search(r"urn:btih:([0-9a-fA-F]{40})", magnet)
+    if m:
+        return m.group(1).lower()
+    # Some magnets use base32-encoded hashes
+    m = re.search(r"urn:btih:([A-Za-z2-7]{32})", magnet)
+    if m:
+        import base64
+
+        raw = base64.b32decode(m.group(1).upper())
+        return raw.hex()
+    return None
 
 
 def _find_torrent(torrents: list[dict], query: str) -> Optional[dict]:
@@ -531,7 +547,56 @@ async def jackett_add(
             tag=tag,
         )
 
-    return f"Added to qBittorrent: {title}"
+        # Find the torrent in qBittorrent so we can wait for seeders
+        t_hash = None
+        if source.startswith("magnet:"):
+            t_hash = _hash_from_magnet(source)
+
+        # If we couldn't parse the hash, search by tag or name
+        if not t_hash:
+            await asyncio.sleep(2)
+            torrents = await qbt.get_torrents(tag=tag) if tag else await qbt.get_torrents()
+            torrent = _find_torrent(torrents, title.lower()[:20])
+            if torrent:
+                t_hash = torrent["hash"]
+
+        if not t_hash:
+            return f"Added to qBittorrent: {title} (could not confirm seeder status)"
+
+        # Wait for the torrent to appear and get at least one seeder
+        interval = 5
+        elapsed = 0
+        while elapsed < _NO_SEEDERS_TIMEOUT:
+            torrents = await qbt.get_torrents()
+            torrent = _find_torrent(torrents, t_hash)
+            if not torrent:
+                if elapsed < 15:
+                    await asyncio.sleep(interval)
+                    elapsed += interval
+                    continue
+                return f"ERROR: Torrent not found in qBittorrent after adding: {title}"
+
+            state = torrent.get("state", "")
+            num_seeds = torrent.get("num_seeds", 0)
+            progress = torrent.get("progress", 0)
+
+            if state in _ERROR_STATES:
+                friendly = STATE_MAP.get(state, state)
+                return f"ERROR adding {title}: state={friendly} ({t_hash[:12]})"
+
+            if num_seeds > 0 or progress >= 1.0:
+                return (
+                    f"Added to qBittorrent: {title} ({t_hash[:12]})\n"
+                    f"Seeds: {num_seeds}  Progress: {format_progress(progress)}"
+                )
+
+            await asyncio.sleep(interval)
+            elapsed += interval
+
+        return (
+            f"DEAD TORRENT: {title} — no seeders connected after "
+            f"{_NO_SEEDERS_TIMEOUT // 60} minutes ({t_hash[:12]})"
+        )
 
 
 # ---------------------------------------------------------------------------
