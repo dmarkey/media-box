@@ -213,14 +213,14 @@ async def qbt_list(
             "size": format_size(t.get("size")),
             "progress": format_progress(t.get("progress", 0)),
             "state": STATE_MAP.get(t.get("state", ""), t.get("state", "")),
-            "hash": t.get("hash", ""),
+            "hash": t.get("hash", "")[:12],
         })
     return format_table(rows, [
         ("Name", "name", 0),
         ("Size", "size", 10),
         ("Progress", "progress", 28),
         ("State", "state", 12),
-        ("Hash", "hash", 40),
+        ("Hash", "hash", 12),
     ])
 
 
@@ -249,7 +249,7 @@ async def qbt_info(query: str) -> str:
 
     lines = [
         f"Name:       {torrent.get('name')}",
-        f"Hash:       {h}",
+        f"Hash:       {h[:12]}",
         f"State:      {state}",
         f"Progress:   {format_progress(progress)}",
         f"Size:       {format_size(torrent.get('size'))}",
@@ -277,23 +277,33 @@ async def qbt_delete(hashes: list[str], delete_files: bool = False) -> str:
     """Delete one or more torrents from qBittorrent.
 
     Args:
-        hashes: List of full torrent info hashes to delete
+        hashes: List of torrent info hashes (or prefixes) to delete
         delete_files: Also delete downloaded files from disk
     """
     url, user, pw = _qbt_config()
     async with QBittorrentClient(url, user, pw) as client:
-        await client.delete_torrents(hashes, delete_files=delete_files)
+        torrents = await client.get_torrents()
 
-        remaining = await client.get_torrents()
-        remaining_hashes = {t.get("hash") for t in remaining}
+        resolved: list[str] = []
+        lines: list[str] = []
+        for h in hashes:
+            match = _find_torrent(torrents, h)
+            if match:
+                resolved.append(match["hash"])
+            else:
+                lines.append(f"No torrent matching: {h}")
 
-    lines: list[str] = []
-    action = "Deleted" if not delete_files else "Deleted with files"
-    for h in hashes:
-        if h in remaining_hashes:
-            lines.append(f"Failed to delete: {h}")
-        else:
-            lines.append(f"{action}: {h}")
+        if resolved:
+            await client.delete_torrents(resolved, delete_files=delete_files)
+            remaining = await client.get_torrents()
+            remaining_hashes = {t.get("hash") for t in remaining}
+
+            action = "Deleted" if not delete_files else "Deleted with files"
+            for full_hash in resolved:
+                if full_hash in remaining_hashes:
+                    lines.append(f"Failed to delete: {full_hash[:12]}")
+                else:
+                    lines.append(f"{action}: {full_hash[:12]}")
 
     return "\n".join(lines)
 
@@ -786,8 +796,13 @@ async def _cleanup_torrent(torrent_hash: str) -> str:
         "QBITTORRENT_URL", "QBITTORRENT_USERNAME", "QBITTORRENT_PASSWORD"
     )
     async with QBittorrentClient(url, user, pw) as client:
-        await client.delete_torrent(torrent_hash, delete_files=True)
-    return f"Deleted torrent {torrent_hash[:12]} and remaining files"
+        torrents = await client.get_torrents()
+        match = _find_torrent(torrents, torrent_hash)
+        if not match:
+            return f"No torrent matching: {torrent_hash}"
+        full_hash = match["hash"]
+        await client.delete_torrent(full_hash, delete_files=True)
+    return f"Deleted torrent {full_hash[:12]} and remaining files"
 
 
 @mcp.tool()
