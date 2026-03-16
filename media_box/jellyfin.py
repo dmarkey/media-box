@@ -83,4 +83,36 @@ class JellyfinClient:
         async with self.session.post(url) as r:
             r.raise_for_status()
 
+    async def get_sessions(self) -> list[dict[str, Any]]:
+        """Return active sessions (connected devices/clients)."""
+        url = f"{self.base_url}/Sessions"
+        async with self.session.get(url) as r:
+            r.raise_for_status()
+            return await r.json()
+
+    async def play_on_session(
+        self,
+        session_id: str,
+        item_ids: list[str],
+        start_position_ticks: Optional[int] = None,
+    ) -> None:
+        """Start playback of one or more items on a remote session."""
+        url = f"{self.base_url}/Sessions/{session_id}/Playing"
+        params: dict[str, Any] = {
+            "ItemIds": ",".join(item_ids),
+            "PlayCommand": "PlayNow",
+        }
+        if start_position_ticks is not None:
+            params["StartPositionTicks"] = str(start_position_ticks)
+        async with self.session.post(url, params=params) as r:
+            r.raise_for_status()
+
+    async def send_playback_command(
+        self, session_id: str, command: str
+    ) -> None:
+        """Send a playback command (PlayPause, Stop, NextTrack, etc.)."""
+        url = f"{self.base_url}/Sessions/{session_id}/Playing/{command}"
+        async with self.session.post(url) as r:
+            r.raise_for_status()
+
 

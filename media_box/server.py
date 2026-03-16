@@ -141,6 +141,105 @@ async def jellyfin_refresh() -> str:
     return "Library scan triggered"
 
 
+@mcp.tool()
+async def jellyfin_devices() -> str:
+    """List Jellyfin devices that support remote playback control.
+
+    Only shows devices with an active Jellyfin app session that can receive
+    play commands. Use the session ID from this list with jellyfin_play and
+    jellyfin_command.
+    """
+    url, key = _jellyfin_config()
+    async with JellyfinClient(url, key) as client:
+        sessions = await client.get_sessions()
+
+    # Only include sessions that actually accept commands
+    controllable = [
+        s for s in sessions
+        if s.get("Capabilities", {}).get("SupportsMediaControl")
+        and s.get("Capabilities", {}).get("SupportedCommands")
+    ]
+
+    if not controllable:
+        return "No controllable devices found. Ensure a Jellyfin client app is open on the target device."
+
+    rows = []
+    for s in controllable:
+        now_playing = s.get("NowPlayingItem")
+        playing_str = now_playing.get("Name", "?") if now_playing else ""
+        rows.append({
+            "device": s.get("DeviceName", "?"),
+            "client": s.get("Client", "?"),
+            "session_id": s.get("Id", ""),
+            "playing": playing_str,
+        })
+    return format_table(rows, [
+        ("Device", "device", 25),
+        ("Client", "client", 25),
+        ("Session ID", "session_id", 36),
+        ("Now Playing", "playing", 30),
+    ])
+
+
+@mcp.tool()
+async def jellyfin_play(session_id: str, item_id: str) -> str:
+    """Start playing a Jellyfin item on a remote device.
+
+    Use jellyfin_devices to find the session_id and jellyfin_search to find
+    the item_id.
+
+    Args:
+        session_id: Target device session ID from jellyfin_devices
+        item_id: Jellyfin item ID to play (movie, episode, etc.)
+    """
+    url, key = _jellyfin_config()
+    async with JellyfinClient(url, key) as client:
+        await client.play_on_session(session_id, [item_id])
+
+        # Check playback state
+        await asyncio.sleep(2)
+        sessions = await client.get_sessions()
+
+    for s in sessions:
+        if s["Id"] == session_id:
+            now_playing = s.get("NowPlayingItem")
+            if now_playing:
+                ps = s.get("PlayState", {})
+                state = "paused" if ps.get("IsPaused") else "playing"
+                method = ps.get("PlayMethod", "?")
+                return f"Now {state}: {now_playing.get('Name', '?')} on {s.get('DeviceName', '?')} ({method})"
+            return f"Play command sent to {s.get('DeviceName', '?')} but playback not confirmed. The device may not have responded."
+
+    return "Play command sent but session not found afterwards."
+
+
+PLAYBACK_COMMANDS = {
+    "playpause", "pause", "unpause", "stop",
+    "nexttrack", "previoustrack",
+    "rewind", "fastforward",
+    "setvolume", "mute", "unmute", "togglemute",
+}
+
+
+@mcp.tool()
+async def jellyfin_command(session_id: str, command: str) -> str:
+    """Send a playback command to a Jellyfin device.
+
+    Args:
+        session_id: Target device session ID from jellyfin_devices
+        command: Playback command — one of: PlayPause, Pause, Unpause, Stop,
+                 NextTrack, PreviousTrack, Rewind, FastForward,
+                 SetVolume, Mute, Unmute, ToggleMute
+    """
+    if command.lower() not in PLAYBACK_COMMANDS:
+        return f"Unknown command '{command}'. Valid commands: {', '.join(sorted(PLAYBACK_COMMANDS))}"
+
+    url, key = _jellyfin_config()
+    async with JellyfinClient(url, key) as client:
+        await client.send_playback_command(session_id, command)
+    return f"Sent {command} to session {session_id[:12]}..."
+
+
 # ---------------------------------------------------------------------------
 # qBittorrent tools
 # ---------------------------------------------------------------------------
