@@ -196,21 +196,22 @@ async def jellyfin_play(session_id: str, item_id: str) -> str:
     async with JellyfinClient(url, key) as client:
         await client.play_on_session(session_id, [item_id])
 
-        # Check playback state
-        await asyncio.sleep(2)
-        sessions = await client.get_sessions()
+        # Poll for playback confirmation (transcoding can delay startup)
+        device_name = "?"
+        for attempt in range(5):
+            await asyncio.sleep(2)
+            sessions = await client.get_sessions()
+            for s in sessions:
+                if s["Id"] == session_id:
+                    device_name = s.get("DeviceName", "?")
+                    now_playing = s.get("NowPlayingItem")
+                    if now_playing:
+                        ps = s.get("PlayState", {})
+                        state = "paused" if ps.get("IsPaused") else "playing"
+                        method = ps.get("PlayMethod", "?")
+                        return f"Now {state}: {now_playing.get('Name', '?')} on {device_name} ({method})"
 
-    for s in sessions:
-        if s["Id"] == session_id:
-            now_playing = s.get("NowPlayingItem")
-            if now_playing:
-                ps = s.get("PlayState", {})
-                state = "paused" if ps.get("IsPaused") else "playing"
-                method = ps.get("PlayMethod", "?")
-                return f"Now {state}: {now_playing.get('Name', '?')} on {s.get('DeviceName', '?')} ({method})"
-            return f"Play command sent to {s.get('DeviceName', '?')} but playback not confirmed. The device may not have responded."
-
-    return "Play command sent but session not found afterwards."
+    return f"Play command sent to {device_name} but playback not confirmed after 10s. The device may not have responded."
 
 
 PLAYBACK_COMMANDS = {
