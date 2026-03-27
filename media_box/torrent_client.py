@@ -21,6 +21,13 @@ import libtorrent as lt
 
 logger = logging.getLogger("media_box.torrent_client")
 
+
+def _bool(value: str | None, default: bool) -> bool:
+    """Parse a config string as boolean."""
+    if value is None:
+        return default
+    return value.lower() in ("true", "1", "yes", "on")
+
 # ---------------------------------------------------------------------------
 # State mapping (compatible with qBittorrent state names)
 # ---------------------------------------------------------------------------
@@ -69,8 +76,9 @@ class TorrentClient:
         self,
         state_dir: str | Path | None = None,
         default_save_path: str | Path | None = None,
-        listen_port: int = 6881,
     ):
+        from . import config
+
         self._state_dir = Path(state_dir or Path.home() / ".config" / "media-box" / "torrents")
         self._state_dir.mkdir(parents=True, exist_ok=True)
         self._resume_dir = self._state_dir / "resume"
@@ -82,16 +90,54 @@ class TorrentClient:
         # Torrent metadata (tags, categories) — libtorrent doesn't track these
         self._meta: dict[str, dict[str, Any]] = self._load_meta()
 
+        # Seeding policy
+        self._seed_ratio = float(config.TORRENT_SEED_RATIO or 0)
+        self._seed_time = int(config.TORRENT_SEED_TIME or 0) * 60  # config is minutes, store as seconds
+
         # Create libtorrent session
+        listen_port = int(config.TORRENT_PORT or 6881)
         settings = {
             "listen_interfaces": f"0.0.0.0:{listen_port}",
-            "enable_dht": True,
-            "enable_lsd": True,
-            "enable_natpmp": True,
-            "enable_upnp": True,
+            "enable_dht": _bool(config.TORRENT_ENABLE_DHT, True),
+            "enable_lsd": _bool(config.TORRENT_ENABLE_LSD, True),
+            "enable_natpmp": _bool(config.TORRENT_ENABLE_NATPMP, True),
+            "enable_upnp": _bool(config.TORRENT_ENABLE_UPNP, True),
+            "enable_incoming_utp": _bool(config.TORRENT_ENABLE_UTP, True),
+            "enable_outgoing_utp": _bool(config.TORRENT_ENABLE_UTP, True),
+            "connections_limit": int(config.TORRENT_MAX_CONNECTIONS or 200),
+            "unchoke_slots_limit": int(config.TORRENT_MAX_UPLOADS or -1),
+            "download_rate_limit": int(config.TORRENT_DOWNLOAD_RATE_LIMIT or 0),
+            "upload_rate_limit": int(config.TORRENT_UPLOAD_RATE_LIMIT or 0),
+            "anonymous_mode": _bool(config.TORRENT_ANONYMOUS_MODE, False),
             "alert_mask": lt.alert.category_t.status_notification | lt.alert.category_t.error_notification,
         }
+
+        # Encryption policy (0=forced, 1=enabled, 2=disabled)
+        enc = (config.TORRENT_ENCRYPTION or "enabled").lower()
+        enc_val = {"forced": 0, "enabled": 1, "disabled": 2}.get(enc, 1)
+        settings["in_enc_policy"] = enc_val
+        settings["out_enc_policy"] = enc_val
+
+        # Peer proxy (separate from search proxy)
+        proxy_url = config.TORRENT_PROXY_URL
+        if proxy_url:
+            from urllib.parse import urlparse
+            p = urlparse(proxy_url)
+            settings["proxy_hostname"] = p.hostname or ""
+            settings["proxy_port"] = p.port or 1080
+            settings["proxy_type"] = lt.proxy_type_t.socks5_pw if p.username else lt.proxy_type_t.socks5
+            if p.username:
+                settings["proxy_username"] = p.username
+            if p.password:
+                settings["proxy_password"] = p.password
+            settings["proxy_peer_connections"] = True
+
         self._session = lt.session(settings)
+
+        # Per-torrent defaults
+        self._max_connections_per_torrent = int(config.TORRENT_MAX_CONNECTIONS_PER_TORRENT or 50)
+        self._max_uploads_per_torrent = int(config.TORRENT_MAX_UPLOADS_PER_TORRENT or -1)
+
         self._handles: dict[str, lt.torrent_handle] = {}
 
         # Restore previous torrents
@@ -251,6 +297,10 @@ class TorrentClient:
             params.save_path = save
             handle = self._session.add_torrent(params)
 
+        # Apply per-torrent limits
+        handle.set_max_connections(self._max_connections_per_torrent)
+        handle.set_max_uploads(self._max_uploads_per_torrent)
+
         # Wait briefly for info_hash to be available
         await asyncio.sleep(0.5)
         info_hash = str(handle.info_hash())
@@ -291,6 +341,20 @@ class TorrentClient:
 
             status = handle.status()
             state_str = _lt_state_to_str(status.state)
+
+            # Enforce seeding policy — auto-pause when limits are met
+            if status.is_seeding and not status.paused:
+                ratio = status.total_upload / max(status.total_wanted_done, 1)
+                seed_time = status.seeding_duration if hasattr(status, "seeding_duration") else 0
+                should_stop = False
+                if self._seed_ratio > 0 and ratio >= self._seed_ratio:
+                    should_stop = True
+                if self._seed_time > 0 and seed_time >= self._seed_time:
+                    should_stop = True
+                if should_stop:
+                    handle.pause()
+                    meta["completed_on"] = meta.get("completed_on") or int(time.time())
+                    self._save_meta()
 
             # Match qBittorrent's paused states
             if status.paused and not status.auto_managed:
