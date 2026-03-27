@@ -281,23 +281,238 @@ def _find_torrent(torrents: list[dict], query: str) -> Optional[dict]:
     return None
 
 
+_DONE_STATES = {"uploading", "stalledUP", "pausedUP"}
+_ERROR_STATES = {"error", "missingFiles"}
+_NO_SEEDERS_TIMEOUT = 300
+_last_search_id: Optional[str] = None
+
+
+def _cleanup_stale_searches(max_age_secs: int = 1800) -> None:
+    if not SEARCH_DIR.exists():
+        return
+    import time
+    cutoff = time.time() - max_age_secs
+    for f in SEARCH_DIR.glob("*.json"):
+        if f.stat().st_mtime < cutoff:
+            f.unlink(missing_ok=True)
+
+
+def _save_search(search_id: str, query: str, results: list[dict]) -> None:
+    global _last_search_id
+    SEARCH_DIR.mkdir(parents=True, exist_ok=True)
+    _cleanup_stale_searches()
+    (SEARCH_DIR / f"{search_id}.json").write_text(
+        json.dumps({"query": query, "results": results})
+    )
+    _last_search_id = search_id
+
+
+def _load_search(search_id: str) -> dict:
+    path = SEARCH_DIR / f"{search_id}.json"
+    if not path.exists():
+        raise ValueError(f"Search '{search_id}' not found. Run torrent_search first.")
+    return json.loads(path.read_text())
+
+
+# ---------------------------------------------------------------------------
+# Torrent tools
+# ---------------------------------------------------------------------------
+
+
 @mcp.tool()
-async def qbt_list(
-    filter: Optional[str] = None,
+async def torrent_search(
+    query: str,
+    category: Optional[str] = None,
+    limit: Optional[int] = None,
+    sort: str = "seeders",
+) -> str:
+    """Search for torrents across configured indexers. Returns a numbered list.
+    Use torrent_download with a result number to start downloading.
+
+    Args:
+        query: Search term (e.g. "The Matrix 1999", "Breaking Bad S03")
+        category: Filter by category — "movies" or "tv"
+        limit: Maximum number of results to return
+        sort: Sort results by "seeders" (default) or "size"
+    """
+    cat_id = CATEGORY_MAP.get(category) if category else None
+    search_limit = limit or 50
+
+    results = await torrent_search_fn(query, category=cat_id, limit=search_limit)
+
+    results.sort(
+        key=lambda r: r.get("Seeders" if sort == "seeders" else "Size", 0) or 0,
+        reverse=True,
+    )
+
+    if limit:
+        results = results[:limit]
+
+    search_id = secrets.token_hex(3)
+    _save_search(search_id, query, results)
+
+    rows = []
+    for i, r in enumerate(results):
+        rows.append({
+            "num": str(i + 1),
+            "title": r.get("Title", ""),
+            "size": format_size(r.get("Size")),
+            "seeders": str(r.get("Seeders", 0)),
+            "indexer": r.get("Tracker", ""),
+        })
+    table = format_table(rows, [
+        ("#", "num", 4),
+        ("Title", "title", 55),
+        ("Size", "size", 10),
+        ("S", "seeders", 5),
+        ("Indexer", "indexer", 15),
+    ])
+
+    return f"{table}\n\n{len(results)} results. Use torrent_download(number) to download."
+
+
+@mcp.tool()
+async def torrent_download(
+    number: int,
+    wait: bool = True,
+    timeout: int = 1800,
+    category: Optional[str] = None,
     tag: Optional[str] = None,
+) -> str:
+    """Download a torrent from the most recent search results.
+    Resolves the download link, adds to the torrent client, and optionally
+    waits for the download to complete.
+
+    Args:
+        number: Result number from torrent_search (e.g. 1, 2, 3)
+        wait: Wait for download to complete (default True)
+        timeout: Max seconds to wait if wait=True (default 1800)
+        category: Category tag for organizing (e.g. "tv", "movies")
+        tag: Custom tag for tracking this download
+    """
+    if not _last_search_id:
+        return "Error: no search results. Run torrent_search first."
+
+    idx = number - 1
+    if idx < 0:
+        return "Error: number must be >= 1"
+
+    try:
+        data = _load_search(_last_search_id)
+    except ValueError as e:
+        return str(e)
+
+    results = data["results"]
+    if idx >= len(results):
+        return f"Error: #{number} out of range (search has {len(results)} results)"
+
+    result = results[idx]
+    title = result.get("Title", "unknown")
+    magnet = result.get("MagnetUri")
+    link = result.get("Link")
+    tracker_id = result.get("TrackerId")
+
+    # Resolve download source
+    if magnet:
+        source = magnet
+    elif link:
+        try:
+            resolved = await torrent_resolve_link(link, tracker_id=tracker_id)
+        except Exception as e:
+            return f"Error resolving download for #{number}: {e}"
+        if isinstance(resolved, str):
+            source = resolved
+        else:
+            tmp_path = SEARCH_DIR / f"{_last_search_id}_{idx}.torrent"
+            tmp_path.write_bytes(resolved)
+            source = str(tmp_path)
+    else:
+        return f"Error: #{number} has no download link"
+
+    # Add to torrent client
+    save_path = config.get_env("TEMP_DOWNLOAD_LOCATION", "TEMPORARY_DOWNLOAD_LOCATION")
+    if not save_path:
+        save_path = str(Path(tempfile.gettempdir()) / "media-box" / "downloads")
+        Path(save_path).mkdir(parents=True, exist_ok=True)
+
+    client = _torrent_client()
+    t_hash = await client.add_torrent(
+        source, save_path=save_path, category=category, tag=tag,
+    )
+
+    if not wait:
+        return f"Added: {title} ({t_hash[:12]})\nUse torrent_wait(\"{t_hash[:12]}\") to monitor."
+
+    # Wait for completion
+    timeout = min(max(timeout, 60), 1800)
+    interval = 10
+    elapsed = 0
+    name = title
+    ever_had_seeders = False
+    last_status = ""
+
+    while elapsed < timeout:
+        torrents = await client.get_torrents()
+        torrent = _find_torrent(torrents, t_hash)
+        if not torrent:
+            if elapsed < 15:
+                await asyncio.sleep(5)
+                elapsed += 5
+                continue
+            return f"ERROR: Torrent not found after adding: {name}"
+
+        state = torrent.get("state", "")
+        progress = torrent.get("progress", 0)
+        dlspeed = torrent.get("dlspeed", 0)
+        eta = torrent.get("eta", 0)
+        num_seeds = torrent.get("num_seeds", 0)
+        name = torrent.get("name", name)
+
+        if num_seeds > 0:
+            ever_had_seeders = True
+
+        last_status = (
+            f"{format_progress(progress)}  "
+            f"{format_size(dlspeed)}/s  "
+            f"ETA {_format_eta(eta)}  "
+            f"Seeds {num_seeds}"
+        )
+
+        if state in _DONE_STATES and (ever_had_seeders or progress >= 1.0):
+            save = torrent.get("save_path", save_path)
+            return (
+                f"Complete: {name} ({t_hash[:12]})\n{last_status}\n"
+                f"Save path: {save}"
+            )
+
+        if state in _ERROR_STATES:
+            friendly = STATE_MAP.get(state, state)
+            return f"ERROR: {name} — {friendly} ({t_hash[:12]})"
+
+        if elapsed >= _NO_SEEDERS_TIMEOUT and not ever_had_seeders and progress < 1.0:
+            return f"DEAD TORRENT: {name} — no seeders after {_NO_SEEDERS_TIMEOUT // 60}min ({t_hash[:12]})"
+
+        await asyncio.sleep(interval)
+        elapsed += interval
+
+    return f"TIMEOUT after {timeout}s: {name} ({t_hash[:12]})\n{last_status}"
+
+
+@mcp.tool()
+async def torrent_list(
+    filter: Optional[str] = None,
     category: Optional[str] = None,
     state: Optional[str] = None,
 ) -> str:
-    """List torrents in torrent client.
+    """List active and completed torrents.
 
     Args:
-        filter: Filter torrents by name substring
-        tag: Filter by torrent client tag
-        category: Filter by torrent client category
-        state: Filter by state (Downloading, Completed, Error, Missing, Stalled, Paused, Queued, Checking, Moving). "Completed" includes both finished and seeding torrents.
+        filter: Filter by name substring
+        category: Filter by category
+        state: Filter by state (Downloading, Completed, Stalled, Paused, Error)
     """
     client = _torrent_client()
-    torrents = await client.get_torrents(category=category, tag=tag)
+    torrents = await client.get_torrents(category=category)
 
     if filter:
         filt = filter.lower()
@@ -306,7 +521,6 @@ async def qbt_list(
     if state:
         state_filter = state.lower()
         if state_filter == "completed":
-            # "Completed" means done downloading — includes seeding/completed/paused-after-finish
             completed_states = {"seeding", "completed"}
             torrents = [
                 t for t in torrents
@@ -337,11 +551,11 @@ async def qbt_list(
 
 
 @mcp.tool()
-async def qbt_info(query: str) -> str:
+async def torrent_info(query: str) -> str:
     """Get detailed info about a torrent — progress, speed, ETA, save path, files.
 
     Args:
-        query: Torrent hash (or prefix) or name substring
+        query: Torrent hash prefix or name substring
     """
     client = _torrent_client()
     torrents = await client.get_torrents()
@@ -354,7 +568,7 @@ async def qbt_info(query: str) -> str:
 
     state = STATE_MAP.get(torrent.get("state", ""), torrent.get("state", ""))
     progress = torrent.get("progress", 0)
-    save_path = torrent.get("save_path") or torrent.get("content_path", "")
+    save_path = torrent.get("save_path", "")
 
     lines = [
         f"Name:       {torrent.get('name')}",
@@ -362,72 +576,48 @@ async def qbt_info(query: str) -> str:
         f"State:      {state}",
         f"Progress:   {format_progress(progress)}",
         f"Size:       {format_size(torrent.get('size'))}",
-        f"Downloaded: {format_size(torrent.get('downloaded'))}",
         f"Speed:      {format_size(torrent.get('dlspeed', 0))}/s",
         f"ETA:        {_format_eta(torrent.get('eta', 0))}",
         f"Save path:  {save_path}",
-        f"Category:   {torrent.get('category', '')}",
-        f"Tags:       {torrent.get('tags', '')}",
     ]
 
     if files:
         lines.append(f"\nFiles ({len(files)}):")
         for f in files:
             pct = f.get("progress", 0) * 100
-            name = f.get("name", "")
-            size = format_size(f.get("size"))
-            lines.append(f"  {pct:5.1f}%  {size:>10s}  {name}")
+            lines.append(f"  {pct:5.1f}%  {format_size(f.get('size')):>10s}  {f.get('name', '')}")
 
     return "\n".join(lines)
 
 
 @mcp.tool()
-async def qbt_delete(hashes: list[str], delete_files: bool = False) -> str:
-    """Delete one or more torrents from torrent client.
+async def torrent_delete(query: str, delete_files: bool = False) -> str:
+    """Delete a torrent by hash prefix or name.
 
     Args:
-        hashes: List of torrent info hashes (or prefixes) to delete
+        query: Torrent hash prefix or name substring
         delete_files: Also delete downloaded files from disk
     """
     client = _torrent_client()
     torrents = await client.get_torrents()
+    torrent = _find_torrent(torrents, query)
+    if not torrent:
+        return f"No torrent matching '{query}'"
 
-    resolved: list[str] = []
-    lines: list[str] = []
-    for h in hashes:
-        match = _find_torrent(torrents, h)
-        if match:
-            resolved.append(match["hash"])
-        else:
-            lines.append(f"No torrent matching: {h}")
-
-    if resolved:
-        await client.delete_torrents(resolved, delete_files=delete_files)
-        remaining = await client.get_torrents()
-        remaining_hashes = {t.get("hash") for t in remaining}
-
-        action = "Deleted" if not delete_files else "Deleted with files"
-        for full_hash in resolved:
-            if full_hash in remaining_hashes:
-                lines.append(f"Failed to delete: {full_hash[:12]}")
-            else:
-                lines.append(f"{action}: {full_hash[:12]}")
-
-    return "\n".join(lines)
-
-
-_DONE_STATES = {"uploading", "stalledUP", "pausedUP"}
-_ERROR_STATES = {"error", "missingFiles"}
-_NO_SEEDERS_TIMEOUT = 300
+    h = torrent["hash"]
+    name = torrent.get("name", h[:12])
+    await client.delete_torrent(h, delete_files=delete_files)
+    action = "Deleted with files" if delete_files else "Deleted"
+    return f"{action}: {name} ({h[:12]})"
 
 
 @mcp.tool()
-async def qbt_wait(query: str, timeout: int = 1800) -> str:
-    """Wait for a torrent to complete downloading. Blocks until done, error, or timeout.
+async def torrent_wait(query: str, timeout: int = 1800) -> str:
+    """Wait for a torrent to finish downloading.
 
     Args:
-        query: Torrent hash (or prefix) or name substring
-        timeout: Seconds to wait (default 1800, min 60, max 1800)
+        query: Torrent hash prefix or name substring
+        timeout: Max seconds to wait (default 1800)
     """
     client = _torrent_client()
     timeout = min(max(timeout, 60), 1800)
@@ -440,22 +630,21 @@ async def qbt_wait(query: str, timeout: int = 1800) -> str:
 
     t_hash = torrent["hash"]
     name = torrent.get("name", t_hash[:12])
-
     elapsed = 0
     ever_had_seeders = False
     last_status = ""
+
     while elapsed < timeout:
         torrents = await client.get_torrents()
         torrent = _find_torrent(torrents, t_hash)
         if not torrent:
-            return f"ERROR: Torrent disappeared: {name} ({t_hash[:12]})"
+            return f"ERROR: Torrent disappeared: {name}"
 
         state = torrent.get("state", "")
         progress = torrent.get("progress", 0)
         dlspeed = torrent.get("dlspeed", 0)
         eta = torrent.get("eta", 0)
         num_seeds = torrent.get("num_seeds", 0)
-        friendly_state = STATE_MAP.get(state, state)
 
         if num_seeds > 0:
             ever_had_seeders = True
@@ -464,210 +653,23 @@ async def qbt_wait(query: str, timeout: int = 1800) -> str:
             f"{format_progress(progress)}  "
             f"{format_size(dlspeed)}/s  "
             f"ETA {_format_eta(eta)}  "
-            f"Seeds {num_seeds}  "
-            f"[{friendly_state}]"
+            f"Seeds {num_seeds}"
         )
 
         if state in _DONE_STATES and (ever_had_seeders or progress >= 1.0):
-            return f"Complete: {name} ({t_hash[:12]})\n{last_status}"
+            save = torrent.get("save_path", "")
+            return f"Complete: {name} ({t_hash[:12]})\n{last_status}\nSave path: {save}"
 
         if state in _ERROR_STATES:
-            return f"ERROR: {name} state={friendly_state} ({t_hash[:12]})\n{last_status}"
+            return f"ERROR: {name} — {STATE_MAP.get(state, state)}"
 
         if elapsed >= _NO_SEEDERS_TIMEOUT and not ever_had_seeders and progress < 1.0:
-            return (
-                f"DEAD TORRENT: {name} — no seeders connected after "
-                f"{_NO_SEEDERS_TIMEOUT // 60} minutes ({t_hash[:12]})\n{last_status}"
-            )
+            return f"DEAD TORRENT: {name} — no seeders after {_NO_SEEDERS_TIMEOUT // 60}min"
 
         await asyncio.sleep(interval)
         elapsed += interval
 
-    return (
-        f"TIMEOUT after {timeout}s: {name} ({t_hash[:12]})\n{last_status}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Torrent search tools
-# ---------------------------------------------------------------------------
-
-
-def _cleanup_stale_searches(max_age_secs: int = 1800) -> None:
-    if not SEARCH_DIR.exists():
-        return
-    import time
-    cutoff = time.time() - max_age_secs
-    for f in SEARCH_DIR.glob("*.json"):
-        if f.stat().st_mtime < cutoff:
-            f.unlink(missing_ok=True)
-
-
-def _save_search(search_id: str, query: str, results: list[dict]) -> None:
-    SEARCH_DIR.mkdir(parents=True, exist_ok=True)
-    _cleanup_stale_searches()
-    (SEARCH_DIR / f"{search_id}.json").write_text(
-        json.dumps({"query": query, "results": results})
-    )
-
-
-def _load_search(search_id: str) -> dict:
-    path = SEARCH_DIR / f"{search_id}.json"
-    if not path.exists():
-        raise ValueError(f"Search '{search_id}' not found. Run a search first.")
-    return json.loads(path.read_text())
-
-
-@mcp.tool()
-async def torrent_search(
-    query: str,
-    category: Optional[str] = None,
-    limit: Optional[int] = None,
-    sort: str = "seeders",
-) -> str:
-    """Search for torrents across configured indexers.
-
-    Args:
-        query: Search term (e.g. "The Matrix 1999", "Breaking Bad S03")
-        category: Filter by category — "movies" or "tv"
-        limit: Maximum number of results to return
-        sort: Sort results by "seeders" (default) or "size"
-    """
-    cat_id = CATEGORY_MAP.get(category) if category else None
-    search_limit = limit or 50
-
-    results = await torrent_search_fn(query, category=cat_id, limit=search_limit)
-
-    results.sort(
-        key=lambda r: r.get("Seeders" if sort == "seeders" else "Size", 0),
-        reverse=True,
-    )
-
-    if limit:
-        results = results[:limit]
-
-    search_id = secrets.token_hex(3)
-    _save_search(search_id, query, results)
-
-    rows = []
-    for i, r in enumerate(results):
-        rows.append({
-            "num": str(i + 1),
-            "title": r.get("Title", ""),
-            "size": format_size(r.get("Size")),
-            "seeders": str(r.get("Seeders", 0)),
-            "leechers": str(r.get("Peers", 0)),
-            "indexer": r.get("Tracker", ""),
-        })
-    table = format_table(rows, [
-        ("#", "num", 4),
-        ("Title", "title", 50),
-        ("Size", "size", 10),
-        ("S", "seeders", 5),
-        ("L", "leechers", 5),
-        ("Indexer", "indexer", 15),
-    ])
-
-    return f"{table}\n\nSearch ID: {search_id}  ({len(results)} results)\nTo add: use torrent_add with ref \"{search_id}:<number>\""
-
-
-@mcp.tool()
-async def torrent_add(
-    ref: str,
-    category: Optional[str] = None,
-    tag: Optional[str] = None,
-) -> str:
-    """Add a torrent search result to torrent client for downloading.
-
-    Args:
-        ref: Search result reference in format "search_id:number" (e.g. "a3f2c1:3")
-        category: torrent client category (e.g. "mm-tv", "mm-movie")
-        tag: torrent client tag for tracking this download
-    """
-    if ":" not in ref:
-        return f"Error: expected format <search-id>:<number>, got '{ref}'"
-    sid, num_str = ref.rsplit(":", 1)
-    try:
-        num = int(num_str)
-    except ValueError:
-        return f"Error: '{num_str}' is not a valid result number"
-    if num < 1:
-        return "Error: result number must be >= 1"
-    idx = num - 1
-
-    data = _load_search(sid)
-    results = data["results"]
-
-    if idx >= len(results):
-        return f"Error: result #{num} out of range (search has {len(results)} results)"
-
-    result = results[idx]
-    title = result.get("Title", "unknown")
-    magnet = result.get("MagnetUri") or result.get("magneturi")
-    link = result.get("Link")
-
-    tracker_id = result.get("TrackerId")
-
-    if magnet:
-        source = magnet
-    elif link:
-        resolved = await torrent_resolve_link(link, tracker_id=tracker_id)
-        if isinstance(resolved, str):
-            source = resolved
-        else:
-            tmp_path = SEARCH_DIR / f"{sid}_{idx}.torrent"
-            tmp_path.write_bytes(resolved)
-            source = str(tmp_path)
-    else:
-        return f"Error: result #{num} has no magnet or download link"
-
-    save_path = config.get_env("TEMP_DOWNLOAD_LOCATION", "TEMPORARY_DOWNLOAD_LOCATION")
-    if not save_path:
-        save_path = str(Path(tempfile.gettempdir()) / "media-box" / "downloads")
-        Path(save_path).mkdir(parents=True, exist_ok=True)
-
-    client = _torrent_client()
-    t_hash = await client.add_torrent(
-        source,
-        save_path=save_path,
-        category=category,
-        tag=tag,
-    )
-
-    # Wait for the torrent to appear and get at least one seeder
-    interval = 5
-    elapsed = 0
-    while elapsed < _NO_SEEDERS_TIMEOUT:
-        torrents = await client.get_torrents()
-        torrent = _find_torrent(torrents, t_hash)
-        if not torrent:
-            if elapsed < 15:
-                await asyncio.sleep(interval)
-                elapsed += interval
-                continue
-            return f"ERROR: Torrent not found in torrent client after adding: {title}"
-
-        state = torrent.get("state", "")
-        num_seeds = torrent.get("num_seeds", 0)
-        progress = torrent.get("progress", 0)
-
-        if state in _ERROR_STATES:
-            friendly = STATE_MAP.get(state, state)
-            return f"ERROR adding {title}: state={friendly} ({t_hash[:12]})"
-
-        if num_seeds > 0 or progress >= 1.0:
-            return (
-                f"Added to torrent client: {title} ({t_hash[:12]})\n"
-                f"Seeds: {num_seeds}  Progress: {format_progress(progress)}"
-            )
-
-        await asyncio.sleep(interval)
-        elapsed += interval
-
-    return (
-        f"DEAD TORRENT: {title} — no seeders connected after "
-        f"{_NO_SEEDERS_TIMEOUT // 60} minutes ({t_hash[:12]})"
-    )
+    return f"TIMEOUT after {timeout}s: {name} ({t_hash[:12]})\n{last_status}"
 
 
 # ---------------------------------------------------------------------------

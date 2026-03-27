@@ -1,9 +1,9 @@
 # Media Box — MCP Server Instructions
 
-You have access to the `media-box` MCP tools for managing media across Jellyfin, qBittorrent, Jackett, and TVMaze. This document defines how to handle user media requests end-to-end.
+You have access to the `media-box` MCP tools for managing media across Jellyfin, torrent search/download, and TVMaze. This document defines how to handle user media requests end-to-end.
 
 > **IMPORTANT — Use `media-box` MCP tools for everything.**
-> All interaction with Jellyfin, qBittorrent, Jackett, and TVMaze **must** go through the MCP tools listed below. Do **not** use `curl`, `wget`, direct API calls, or any other method to contact these services. Do **not** use shell commands like `mv`, `cp`, `rsync`, or `rm` to move or copy media files — always use `mover_movie` / `mover_tv`. The tools handle authentication, path resolution, error handling, and output formatting. If a tool fails, report the error to the user — do not attempt to work around it by hitting the APIs directly or using shell commands.
+> All interaction with Jellyfin, torrents, and TVMaze **must** go through the MCP tools listed below. Do **not** use `curl`, `wget`, direct API calls, or any other method to contact these services. Do **not** use shell commands like `mv`, `cp`, `rsync`, or `rm` to move or copy media files — always use `mover_movie` / `mover_tv`. The tools handle authentication, path resolution, error handling, and output formatting. If a tool fails, report the error to the user — do not attempt to work around it.
 
 ## Available Tools
 
@@ -11,15 +11,14 @@ You have access to the `media-box` MCP tools for managing media across Jellyfin,
 jellyfin_search(query, type?)            — search Jellyfin library (type: "movie", "series", "episode")
 jellyfin_libraries()                     — list media libraries
 jellyfin_episodes(series_id, season?)    — list episodes for a series
-jellyfin_refresh()                       — trigger a library scan to detect new/removed files
+jellyfin_refresh()                       — trigger a library scan
 
-qbt_list(filter?, tag?, category?, state?)  — list torrents. state "Completed" includes both finished and seeding torrents.
-qbt_info(query)                          — detailed torrent info: progress, speed, ETA, save path, files. query matches by hash prefix or name substring.
-qbt_wait(query, timeout?)               — BLOCKING: waits for torrent to complete/error/timeout (default 1800s / 30 min). query matches by hash prefix or name substring.
-qbt_delete(hashes, delete_files?)        — delete one or more torrents by their full info hash.
-
-jackett_search(query, category?, limit?, sort?)  — search for torrents (category: "movies", "tv"; sort: "seeders", "size")
-jackett_add(ref, category?, tag?)        — add a search result to qBittorrent (ref format: "search_id:number")
+torrent_search(query, category?, limit?, sort?)  — search for torrents (category: "movies", "tv"; sort: "seeders", "size")
+torrent_download(number, wait?, timeout?, category?, tag?)  — download result #N from the last search. Handles everything: resolves link, adds to client, waits for completion.
+torrent_list(filter?, category?, state?)  — list active/completed torrents
+torrent_info(query)                      — detailed torrent info (query by name or hash prefix)
+torrent_delete(query, delete_files?)     — delete a torrent (query by name or hash prefix)
+torrent_wait(query, timeout?)            — wait for a torrent to complete
 
 tvmaze_search(query)                     — search for TV shows
 tvmaze_show(show_id)                     — show details
@@ -29,19 +28,21 @@ tvmaze_lookup(imdb?, tvdb?)              — lookup by external ID
 
 mover_list(path?)                        — list files in the temp download location
 mover_movie(source, dest_name, force?, torrent_hash?)  — move a movie file to the library
-mover_tv(source, dest_name, show, season, force?, torrent_hash?)  — move a single TV episode file
-mover_tv_batch(moves, show, season, force?, torrent_hash?)  — move multiple TV episodes in one call. moves is a list of {"source": "...", "dest_name": "..."}. Use this for season packs instead of calling mover_tv repeatedly.
+mover_tv(source, dest_name, show, season, force?, torrent_hash?)  — move a single TV episode
+mover_tv_batch(moves, show, season, force?, torrent_hash?)  — move multiple TV episodes in one call
 ```
 
-### Jackett search → add flow
+### Torrent search → download flow
 
-`jackett_search` returns a numbered table and a **search ID** (e.g. `a3f2c1`). To download result #3 from that search:
+`torrent_search` returns a numbered list. To download result #3:
 
 ```
-jackett_add(ref="a3f2c1:3", category="mm-tv")
+torrent_download(number=3, category="tv")
 ```
 
-This resolves the magnet/link (handling redirects automatically), downloads to the configured temp location, and adds to qBittorrent. No need to handle magnet links or URLs directly.
+That's it — the tool resolves the download link, adds it to the torrent client, and waits for completion. It returns the save path when done.
+
+You **never** need to handle magnet links, hashes, search IDs, or URLs. Just the result number.
 
 ---
 
@@ -101,69 +102,52 @@ For TV shows, always fetch metadata so you know the correct season/episode struc
 
 ```
 tvmaze_search(query="Breaking Bad")
-```
-
-Pick the correct match (highest score, correct network/year), then:
-
-```
 tvmaze_seasons(show_id=169)
 tvmaze_episodes(show_id=169, season=3)
 ```
 
-This tells you:
-- How many seasons exist
-- Episode names and airdates
-- Whether episodes have actually aired yet (don't try to download future episodes)
+This tells you how many seasons exist, episode names and airdates, and whether episodes have actually aired yet.
 
-**Manual mode:** Present this information to the user and ask what they want.
+### Step 4 — Search for Torrents
 
-**Auto mode:** Use the metadata internally to validate the request and proceed.
-
-### Step 4 — Search for Torrents on Jackett
-
-> **LIMIT: Maximum 2 Jackett searches per request.** If the first search returns no good results, try ONE alternative query. If that also fails, tell the user no results were found. Do NOT keep trying variations — 2 searches max.
+> **LIMIT: Maximum 2 searches per request.** If the first search returns no good results, try ONE alternative query. If that also fails, tell the user.
 
 **For movies:**
 ```
-jackett_search(query="The Matrix 1999", category="movies")
+torrent_search(query="The Matrix 1999", category="movies")
 ```
 
 **For a full TV season:**
 ```
-jackett_search(query="Breaking Bad S03", category="tv")
+torrent_search(query="Breaking Bad S03", category="tv")
 ```
 
 **For a specific episode:**
 ```
-jackett_search(query="Breaking Bad S03E07", category="tv")
+torrent_search(query="Breaking Bad S03E07", category="tv")
 ```
 
 Pick the best option based on:
-1. **Seeders** — more is better
+1. **Seeders** — more is better (dead torrents with 0 seeders are already filtered out)
 2. **Size** — reasonable for the content
 3. **Quality** — prefer 1080p WEB-DL or BluRay
 4. **Completeness** — for season packs, prefer complete packs
 
-### Step 5 — Download the Torrent
+### Step 5 — Download
 
 ```
-jackett_add(ref="<search-id>:<number>", category="mm-tv", tag="breaking-bad-s03")
+torrent_download(number=3, category="tv", tag="breaking-bad-s03")
 ```
 
-- Use `category="mm-tv"` for TV shows, `category="mm-movie"` for movies
-- **Always use `tag`** with a short, unique, lowercase label for the request
+- The `number` is from the search results table
+- Use `category="tv"` for TV shows, `category="movies"` for movies
+- **Always use `tag`** with a short, unique, lowercase label
+- By default, `torrent_download` waits for the download to complete
+- For large downloads, use `wait=False` and later call `torrent_wait`
 
-### Step 6 — Monitor Download Progress
+> **CRITICAL — `torrent_download` handles waiting automatically. Do NOT poll in a loop.**
 
-```
-qbt_wait(query="<hash>")
-```
-
-`qbt_wait` blocks until the torrent completes, errors, or times out.
-
-> **CRITICAL — Always use `qbt_wait` to wait for downloads. Do NOT manually check in a loop.**
-
-### Step 7 — Move Files to Final Destination
+### Step 6 — Move Files to Final Destination
 
 1. **List the downloaded files:**
    ```
@@ -176,7 +160,7 @@ qbt_wait(query="<hash>")
    mover_movie(source="torrent-folder/matrix.mkv", dest_name="The Matrix (1999).mkv", torrent_hash="<hash>")
    ```
 
-3. **Move TV episodes** — use `mover_tv_batch` for season packs (one tool call for all episodes):
+3. **Move TV episodes** — use `mover_tv_batch` for season packs:
    ```
    mover_tv_batch(
      moves=[
@@ -189,15 +173,14 @@ qbt_wait(query="<hash>")
      torrent_hash="<hash>"
    )
    ```
-   For a single episode, use `mover_tv` instead.
 
-### Step 8 — Trigger Jellyfin Library Refresh
+### Step 7 — Trigger Jellyfin Library Refresh
 
 ```
 jellyfin_refresh()
 ```
 
-### Step 9 — Verify
+### Step 8 — Verify
 
 ```
 jellyfin_search(query="Breaking Bad", type="series")
@@ -215,7 +198,7 @@ jellyfin_search(query="Breaking Bad", type="series")
 6. **Don't download unaired episodes** — check airdates from TVMaze.
 7. **Prefer season packs** over individual episodes when the user wants a full season.
 8. **Keep the user informed** — in manual mode, at every step. In auto mode, provide brief status updates.
-9. **Handle errors gracefully** — if a service is down or a search returns nothing, tell the user and suggest alternatives.
+9. **Handle errors gracefully** — if a search returns nothing, tell the user and suggest alternatives.
 10. **Only use tools listed above** — do not invent or guess tool names.
-11. **Never use `sleep` or manual loops** — always use `qbt_wait`. If it times out, call `qbt_wait` again.
-12. **Maximum 2 Jackett searches per request** — if two searches return no usable results, stop and ask the user.
+11. **Never use `sleep` or manual loops** — `torrent_download` and `torrent_wait` handle waiting. If it times out, call `torrent_wait` again.
+12. **Maximum 2 searches per request** — if two searches return no usable results, stop and ask the user.

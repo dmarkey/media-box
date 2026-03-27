@@ -14,7 +14,7 @@ An LLM connected to this server can handle requests like *"download Breaking Bad
 6. Move and rename files to match Jellyfin conventions
 7. Trigger a library refresh
 
-The server exposes 19 tools across five services. It ships with an `instructions` prompt (`SKILL.md`) that teaches the LLM the full workflow, so it knows how to chain the tools together without extra prompting.
+The server exposes 22 tools across four services. It ships with an `instructions` prompt (`SKILL.md`) that teaches the LLM the full workflow, so it knows how to chain the tools together without extra prompting.
 
 ## Requirements
 
@@ -184,21 +184,16 @@ The `qbt_wait` tool blocks until a torrent finishes downloading, which can take 
 | `jellyfin_episodes` | List episodes for a series, with optional season filter |
 | `jellyfin_refresh` | Trigger a library scan to detect new/removed files |
 
-### qBittorrent
+### Torrents
 
 | Tool | Description |
 |------|-------------|
-| `qbt_list` | List torrents with filters for name, tag, category, and state. "Completed" state includes seeding. |
-| `qbt_info` | Detailed torrent info — progress, speed, ETA, save path, file list |
-| `qbt_wait` | Block until a torrent completes, errors, or times out (default 30 min) |
-| `qbt_delete` | Delete one or more torrents by hash, optionally removing downloaded files |
-
-### Torrent Search
-
-| Tool | Description |
-|------|-------------|
-| `torrent_search` | Search for torrents across configured indexers, with category and sort options |
-| `torrent_add` | Add a search result to qBittorrent by reference (e.g. `"a3f2c1:3"`) |
+| `torrent_search` | Search for torrents across configured indexers. Returns a numbered list. |
+| `torrent_download` | Download result #N from the last search. Resolves link, adds to client, waits for completion — all in one call. |
+| `torrent_list` | List active/completed torrents with filters for name, category, state |
+| `torrent_info` | Detailed torrent info — progress, speed, ETA, save path, file list |
+| `torrent_wait` | Block until a torrent completes, errors, or times out |
+| `torrent_delete` | Delete a torrent by name or hash prefix, optionally removing files |
 
 ### TVMaze
 
