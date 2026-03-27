@@ -116,18 +116,18 @@ TORRENT_PROXY = get_env("TORRENT_PROXY")  # socks5://user:pass@host:port
 TORRENT_PORT = get_env("TORRENT_PORT")  # listen port (default: 6881)
 TORRENT_MAX_CONNECTIONS = get_env("TORRENT_MAX_CONNECTIONS")  # global max (default: 200)
 TORRENT_MAX_CONNECTIONS_PER_TORRENT = get_env("TORRENT_MAX_CONNECTIONS_PER_TORRENT")  # per-torrent (default: 50)
-TORRENT_MAX_UPLOADS = get_env("TORRENT_MAX_UPLOADS")  # global upload slots (default: -1 = auto)
+TORRENT_MAX_UPLOADS = get_env("TORRENT_MAX_UPLOADS")  # global upload slots (default: 4)
 TORRENT_MAX_UPLOADS_PER_TORRENT = get_env("TORRENT_MAX_UPLOADS_PER_TORRENT")  # per-torrent (default: -1)
-TORRENT_DOWNLOAD_RATE_LIMIT = get_env("TORRENT_DOWNLOAD_RATE_LIMIT")  # bytes/s, 0 = unlimited
-TORRENT_UPLOAD_RATE_LIMIT = get_env("TORRENT_UPLOAD_RATE_LIMIT")  # bytes/s, 0 = unlimited
+TORRENT_DOWNLOAD_RATE_LIMIT = get_env("TORRENT_DOWNLOAD_RATE_LIMIT")  # bytes/s, 0 = unlimited (default: 0)
+TORRENT_UPLOAD_RATE_LIMIT = get_env("TORRENT_UPLOAD_RATE_LIMIT")  # bytes/s (default: 1048576 = 1MB/s)
 TORRENT_ENABLE_DHT = get_env("TORRENT_ENABLE_DHT")  # true/false (default: true)
 TORRENT_ENABLE_LSD = get_env("TORRENT_ENABLE_LSD")  # true/false (default: true)
 TORRENT_ENABLE_UTP = get_env("TORRENT_ENABLE_UTP")  # true/false (default: true)
 TORRENT_ENABLE_UPNP = get_env("TORRENT_ENABLE_UPNP")  # true/false (default: true)
 TORRENT_ENABLE_NATPMP = get_env("TORRENT_ENABLE_NATPMP")  # true/false (default: true)
-TORRENT_ENCRYPTION = get_env("TORRENT_ENCRYPTION")  # forced/enabled/disabled (default: enabled)
-TORRENT_SEED_RATIO = get_env("TORRENT_SEED_RATIO")  # stop seeding at ratio (default: 0 = seed forever)
-TORRENT_SEED_TIME = get_env("TORRENT_SEED_TIME")  # stop seeding after minutes (default: 0 = forever)
+TORRENT_ENCRYPTION = get_env("TORRENT_ENCRYPTION")  # forced/enabled/disabled (default: forced)
+TORRENT_SEED_RATIO = get_env("TORRENT_SEED_RATIO")  # stop seeding at ratio (default: 1.0)
+TORRENT_SEED_TIME = get_env("TORRENT_SEED_TIME")  # stop seeding after minutes (default: 60)
 TORRENT_ANONYMOUS_MODE = get_env("TORRENT_ANONYMOUS_MODE")  # true/false (default: false)
 TORRENT_PROXY_URL = get_env("TORRENT_PROXY_URL")  # socks5://host:port for libtorrent peer traffic
 

@@ -90,11 +90,15 @@ class TorrentClient:
         # Torrent metadata (tags, categories) — libtorrent doesn't track these
         self._meta: dict[str, dict[str, Any]] = self._load_meta()
 
-        # Seeding policy
-        self._seed_ratio = float(config.TORRENT_SEED_RATIO or 0)
-        self._seed_time = int(config.TORRENT_SEED_TIME or 0) * 60  # config is minutes, store as seconds
+        # Seeding policy — seed to 1.0 ratio or 60 min, whichever comes first
+        self._seed_ratio = float(config.TORRENT_SEED_RATIO or 1.0)
+        self._seed_time = int(config.TORRENT_SEED_TIME or 60) * 60  # config is minutes, store as seconds
 
-        # Create libtorrent session
+        # Create libtorrent session with sane defaults for a media box:
+        # - Moderate connection limits (not a seedbox)
+        # - Upload capped at 1 MB/s to not saturate upstream
+        # - Encryption forced for privacy
+        # - Seed to 1.0 ratio then stop (be a good citizen, but don't seed forever)
         listen_port = int(config.TORRENT_PORT or 6881)
         settings = {
             "listen_interfaces": f"0.0.0.0:{listen_port}",
@@ -105,15 +109,15 @@ class TorrentClient:
             "enable_incoming_utp": _bool(config.TORRENT_ENABLE_UTP, True),
             "enable_outgoing_utp": _bool(config.TORRENT_ENABLE_UTP, True),
             "connections_limit": int(config.TORRENT_MAX_CONNECTIONS or 200),
-            "unchoke_slots_limit": int(config.TORRENT_MAX_UPLOADS or -1),
+            "unchoke_slots_limit": int(config.TORRENT_MAX_UPLOADS or 4),
             "download_rate_limit": int(config.TORRENT_DOWNLOAD_RATE_LIMIT or 0),
-            "upload_rate_limit": int(config.TORRENT_UPLOAD_RATE_LIMIT or 0),
+            "upload_rate_limit": int(config.TORRENT_UPLOAD_RATE_LIMIT or 1024 * 1024),  # 1 MB/s
             "anonymous_mode": _bool(config.TORRENT_ANONYMOUS_MODE, False),
             "alert_mask": lt.alert.category_t.status_notification | lt.alert.category_t.error_notification,
         }
 
-        # Encryption policy (0=forced, 1=enabled, 2=disabled)
-        enc = (config.TORRENT_ENCRYPTION or "enabled").lower()
+        # Encryption forced by default for privacy
+        enc = (config.TORRENT_ENCRYPTION or "forced").lower()
         enc_val = {"forced": 0, "enabled": 1, "disabled": 2}.get(enc, 1)
         settings["in_enc_policy"] = enc_val
         settings["out_enc_policy"] = enc_val
