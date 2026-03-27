@@ -856,11 +856,42 @@ async def tvmaze_lookup(imdb: Optional[str] = None, tvdb: Optional[str] = None) 
 # ---------------------------------------------------------------------------
 
 
+def _normalize_unicode(s: str) -> str:
+    """Normalize Unicode for filename matching.
+
+    MCP JSON transport can mangle curly quotes (U+2018/2019) to straight
+    quotes (U+0027), causing FileNotFoundError. This normalizes both sides
+    so matching works regardless.
+    """
+    import unicodedata
+    s = unicodedata.normalize("NFC", s)
+    s = s.replace("\u2018", "'").replace("\u2019", "'")  # curly single quotes
+    s = s.replace("\u201C", '"').replace("\u201D", '"')  # curly double quotes
+    s = s.replace("\u2013", "-").replace("\u2014", "-")  # en/em dash
+    return s
+
+
 def _resolve_source(source: Path) -> Path:
     if source.is_absolute():
-        return source
-    (temp_dir,) = config.require_env("TEMP_DOWNLOAD_LOCATION")
-    return Path(temp_dir) / source
+        resolved = source
+    else:
+        (temp_dir,) = config.require_env("TEMP_DOWNLOAD_LOCATION")
+        resolved = Path(temp_dir) / source
+
+    # If the exact path exists, use it
+    if resolved.is_file():
+        return resolved
+
+    # Fuzzy match: the MCP JSON transport may have mangled Unicode characters
+    # in the filename. List the parent directory and match after normalization.
+    parent = resolved.parent
+    if parent.is_dir():
+        target = _normalize_unicode(resolved.name)
+        for entry in parent.iterdir():
+            if _normalize_unicode(entry.name) == target:
+                return entry
+
+    return resolved  # return as-is, _validate_source will report the error
 
 
 def _validate_source(source: Path) -> Optional[str]:
