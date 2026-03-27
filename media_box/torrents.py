@@ -34,7 +34,7 @@ async def _get_pyackett():
     from pyackett import Pyackett
 
     config_dir = Path.home() / ".config" / "media-box" / "pyackett"
-    pk = Pyackett(proxy=config.TORRENT_PROXY, config_dir=str(config_dir))
+    pk = Pyackett(proxy=config.TORRENT_SEARCH_PROXY, config_dir=str(config_dir))
     pk.load_definitions_from_github("jackett")
 
     for idx_id in indexers:

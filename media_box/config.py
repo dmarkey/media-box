@@ -110,7 +110,7 @@ JELLYFIN_API_KEY = get_env("JELLYFIN_API_KEY")
 
 # Torrent search (pyackett)
 TORRENT_INDEXERS = get_env("TORRENT_INDEXERS")  # comma-separated: 1337x,therarbg,thepiratebay
-TORRENT_PROXY = get_env("TORRENT_PROXY")  # socks5://user:pass@host:port
+TORRENT_SEARCH_PROXY = get_env("TORRENT_SEARCH_PROXY")  # socks5://user:pass@host:port (for indexer websites)
 
 # Torrent client (libtorrent)
 TORRENT_PORT = get_env("TORRENT_PORT")  # listen port (default: 6881)
