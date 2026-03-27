@@ -349,7 +349,9 @@ class TorrentClient:
             # Enforce seeding policy — auto-pause when limits are met
             if status.is_seeding and not status.paused:
                 ratio = status.total_upload / max(status.total_wanted_done, 1)
-                seed_time = status.seeding_duration if hasattr(status, "seeding_duration") else 0
+                raw_seed_time = status.seeding_duration if hasattr(status, "seeding_duration") else 0
+                # libtorrent may return timedelta or int depending on version
+                seed_time = raw_seed_time.total_seconds() if hasattr(raw_seed_time, "total_seconds") else int(raw_seed_time)
                 should_stop = False
                 if self._seed_ratio > 0 and ratio >= self._seed_ratio:
                     should_stop = True
@@ -405,7 +407,7 @@ class TorrentClient:
                 "size": status.total_wanted,
                 "downloaded": status.total_wanted_done,
                 "uploaded": status.total_upload,
-                "ratio": status.ratio if hasattr(status, "ratio") else (
+                "ratio": float(status.ratio) if hasattr(status, "ratio") else (
                     status.total_upload / max(status.total_wanted_done, 1)
                 ),
                 "save_path": status.save_path,
