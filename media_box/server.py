@@ -50,7 +50,7 @@ def _torrent_client() -> TorrentClient:
 
 
 @mcp.tool()
-async def jellyfin_search(query: str, type: Optional[str] = None) -> str:
+async def jellyfin_search(query: str, type: str = "") -> str:
     """Search the Jellyfin media library.
 
     Args:
@@ -102,16 +102,16 @@ async def jellyfin_libraries() -> str:
 
 
 @mcp.tool()
-async def jellyfin_episodes(series_id: str, season: Optional[int] = None) -> str:
+async def jellyfin_episodes(series_id: str, season: int = 0) -> str:
     """List episodes for a Jellyfin series.
 
     Args:
         series_id: The Jellyfin series ID
-        season: Filter to a specific season number
+        season: Filter to a specific season number. 0 means all seasons.
     """
     url, key = _jellyfin_config()
     async with JellyfinClient(url, key) as client:
-        episodes = await client.get_episodes(series_id, season=season)
+        episodes = await client.get_episodes(series_id, season=season or None)
 
     rows = []
     for ep in episodes:
@@ -322,8 +322,8 @@ def _load_search(search_id: str) -> dict:
 @mcp.tool()
 async def torrent_search(
     query: str,
-    category: Optional[str] = None,
-    limit: Optional[int] = None,
+    category: str = "",
+    limit: int = 0,
     sort: str = "seeders",
 ) -> str:
     """Search for torrents across configured indexers. Returns a numbered list.
@@ -332,7 +332,7 @@ async def torrent_search(
     Args:
         query: Search term (e.g. "The Matrix 1999", "Breaking Bad S03")
         category: Filter by category — "movies" or "tv"
-        limit: Maximum number of results to return
+        limit: Maximum number of results to return. 0 means default (50).
         sort: Sort results by "seeders" (default) or "size"
     """
     cat_id = CATEGORY_MAP.get(category) if category else None
@@ -376,8 +376,8 @@ async def torrent_download(
     number: int,
     wait: bool = True,
     timeout: int = 1800,
-    category: Optional[str] = None,
-    tag: Optional[str] = None,
+    category: str = "",
+    tag: str = "",
 ) -> str:
     """Download a torrent from the most recent search results.
     Resolves the download link, adds to the torrent client, and optionally
@@ -500,9 +500,9 @@ async def torrent_download(
 
 @mcp.tool()
 async def torrent_list(
-    filter: Optional[str] = None,
-    category: Optional[str] = None,
-    state: Optional[str] = None,
+    filter: str = "",
+    category: str = "",
+    state: str = "",
 ) -> str:
     """List active and completed torrents.
 
@@ -512,7 +512,7 @@ async def torrent_list(
         state: Filter by state (Downloading, Completed, Stalled, Paused, Error)
     """
     client = _torrent_client()
-    torrents = await client.get_torrents(category=category)
+    torrents = await client.get_torrents(category=category or None)
 
     if filter:
         filt = filter.lower()
@@ -745,15 +745,15 @@ async def tvmaze_show(show_id: int) -> str:
 
 
 @mcp.tool()
-async def tvmaze_episodes(show_id: int, season: Optional[int] = None) -> str:
+async def tvmaze_episodes(show_id: int, season: int = 0) -> str:
     """List episodes for a TV show from TVMaze.
 
     Args:
         show_id: TVMaze show ID
-        season: Filter to a specific season number
+        season: Filter to a specific season number. 0 means all seasons.
     """
     async with TVMazeClient() as client:
-        if season is not None:
+        if season:
             seasons = await client.get_seasons(show_id)
             season_id = None
             for s in seasons:
@@ -817,7 +817,7 @@ async def tvmaze_seasons(show_id: int) -> str:
 
 
 @mcp.tool()
-async def tvmaze_lookup(imdb: Optional[str] = None, tvdb: Optional[str] = None) -> str:
+async def tvmaze_lookup(imdb: str = "", tvdb: str = "") -> str:
     """Look up a TV show on TVMaze by external ID.
 
     Args:
@@ -914,7 +914,7 @@ def _format_file_size(size: int) -> str:
 
 
 @mcp.tool()
-async def mover_list(path: Optional[str] = None) -> str:
+async def mover_list(path: str = "") -> str:
     """List files in the temporary download location.
 
     Args:
@@ -978,7 +978,7 @@ async def mover_movie(
     source: str,
     dest_name: str,
     force: bool = False,
-    torrent_hash: Optional[str] = None,
+    torrent_hash: str = "",
 ) -> str:
     """Move a movie file to the Jellyfin movies library with proper naming.
 
@@ -1016,7 +1016,7 @@ async def mover_tv(
     show: str,
     season: int,
     force: bool = False,
-    torrent_hash: Optional[str] = None,
+    torrent_hash: str = "",
 ) -> str:
     """Move a TV episode file to the Jellyfin TV library with proper naming.
 
@@ -1055,7 +1055,7 @@ async def mover_tv_batch(
     show: str,
     season: int,
     force: bool = False,
-    torrent_hash: Optional[str] = None,
+    torrent_hash: str = "",
 ) -> str:
     """Move multiple TV episode files to the Jellyfin TV library in one operation.
 
