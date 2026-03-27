@@ -107,10 +107,6 @@ def require_env(*names: str) -> list[str]:
 JELLYFIN_URL = get_env("JELLYFIN_URL")
 JELLYFIN_API_KEY = get_env("JELLYFIN_API_KEY")
 
-# qBittorrent
-QBITTORRENT_URL = get_env("QBITTORRENT_URL", "QBT_HOST")
-QBITTORRENT_USERNAME = get_env("QBITTORRENT_USERNAME", "QBT_USERNAME")
-QBITTORRENT_PASSWORD = get_env("QBITTORRENT_PASSWORD", "QBT_PASSWORD")
 
 # Torrent search (pyackett)
 TORRENT_INDEXERS = get_env("TORRENT_INDEXERS")  # comma-separated: 1337x,therarbg,thepiratebay
@@ -121,24 +117,26 @@ TEMP_DOWNLOAD_LOCATION = get_env("TEMP_DOWNLOAD_LOCATION", "TEMPORARY_DOWNLOAD_L
 TV_SHOWS_SAVE_LOCATION = get_env("TV_SHOWS_SAVE_LOCATION")
 MOVIES_SAVE_LOCATION = get_env("MOVIES_SAVE_LOCATION")
 
-# qBittorrent path mapping (host ↔ container)
-QBITTORRENT_HOST_PATH = get_env("QBITTORRENT_HOST_PATH")
-QBITTORRENT_CONTAINER_PATH = get_env("QBITTORRENT_CONTAINER_PATH")
+# Path mapping — the MCP server may see files at different paths than Jellyfin
+# (e.g. NAS mounts, Docker volumes, NFS). LOCAL_PATH is where this server
+# writes files; JELLYFIN_PATH is how Jellyfin sees the same location.
+LOCAL_PATH_PREFIX = get_env("LOCAL_PATH_PREFIX")
+JELLYFIN_PATH_PREFIX = get_env("JELLYFIN_PATH_PREFIX")
 
 
-def to_container_path(host_path: str) -> str:
-    """Translate a host path to the corresponding qBittorrent container path."""
-    if QBITTORRENT_HOST_PATH and QBITTORRENT_CONTAINER_PATH:
-        prefix = QBITTORRENT_HOST_PATH.rstrip("/")
-        if host_path.startswith(prefix):
-            return QBITTORRENT_CONTAINER_PATH.rstrip("/") + host_path[len(prefix):]
-    return host_path
+def to_jellyfin_path(local_path: str) -> str:
+    """Translate a local path to the corresponding Jellyfin path."""
+    if LOCAL_PATH_PREFIX and JELLYFIN_PATH_PREFIX:
+        prefix = LOCAL_PATH_PREFIX.rstrip("/")
+        if local_path.startswith(prefix):
+            return JELLYFIN_PATH_PREFIX.rstrip("/") + local_path[len(prefix):]
+    return local_path
 
 
-def to_host_path(container_path: str) -> str:
-    """Translate a qBittorrent container path to the corresponding host path."""
-    if QBITTORRENT_HOST_PATH and QBITTORRENT_CONTAINER_PATH:
-        prefix = QBITTORRENT_CONTAINER_PATH.rstrip("/")
-        if container_path.startswith(prefix):
-            return QBITTORRENT_HOST_PATH.rstrip("/") + container_path[len(prefix):]
-    return container_path
+def to_local_path(jellyfin_path: str) -> str:
+    """Translate a Jellyfin path to the corresponding local path."""
+    if LOCAL_PATH_PREFIX and JELLYFIN_PATH_PREFIX:
+        prefix = JELLYFIN_PATH_PREFIX.rstrip("/")
+        if jellyfin_path.startswith(prefix):
+            return LOCAL_PATH_PREFIX.rstrip("/") + jellyfin_path[len(prefix):]
+    return jellyfin_path

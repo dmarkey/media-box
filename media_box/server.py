@@ -18,7 +18,7 @@ from .formatting import (
     truncate,
 )
 from .jellyfin import JellyfinClient
-from .qbittorrent import QBittorrentClient, STATE_MAP
+from .torrent_client import TorrentClient, STATE_MAP, get_client as get_torrent_client
 from .torrents import CATEGORY_MAP, SEARCH_DIR, search as torrent_search_fn, resolve_link as torrent_resolve_link
 from .tvmaze import TVMazeClient
 from .mover import MEDIA_EXTENSIONS
@@ -37,10 +37,9 @@ def _jellyfin_config() -> tuple[str, str]:
     return tuple(config.require_env("JELLYFIN_URL", "JELLYFIN_API_KEY"))  # type: ignore[return-value]
 
 
-def _qbt_config() -> tuple[str, str, str]:
-    return tuple(  # type: ignore[return-value]
-        config.require_env("QBITTORRENT_URL", "QBITTORRENT_USERNAME", "QBITTORRENT_PASSWORD")
-    )
+def _torrent_client() -> TorrentClient:
+    save_path = config.get_env("TEMP_DOWNLOAD_LOCATION", "TEMPORARY_DOWNLOAD_LOCATION")
+    return get_torrent_client(default_save_path=save_path)
 
 
 
@@ -240,7 +239,7 @@ async def jellyfin_command(session_id: str, command: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# qBittorrent tools
+# torrent client tools
 # ---------------------------------------------------------------------------
 
 
@@ -289,17 +288,16 @@ async def qbt_list(
     category: Optional[str] = None,
     state: Optional[str] = None,
 ) -> str:
-    """List torrents in qBittorrent.
+    """List torrents in torrent client.
 
     Args:
         filter: Filter torrents by name substring
-        tag: Filter by qBittorrent tag
-        category: Filter by qBittorrent category
+        tag: Filter by torrent client tag
+        category: Filter by torrent client category
         state: Filter by state (Downloading, Completed, Error, Missing, Stalled, Paused, Queued, Checking, Moving). "Completed" includes both finished and seeding torrents.
     """
-    url, user, pw = _qbt_config()
-    async with QBittorrentClient(url, user, pw) as client:
-        torrents = await client.get_torrents(category=category, tag=tag)
+    client = _torrent_client()
+    torrents = await client.get_torrents(category=category, tag=tag)
 
     if filter:
         filt = filter.lower()
@@ -345,21 +343,18 @@ async def qbt_info(query: str) -> str:
     Args:
         query: Torrent hash (or prefix) or name substring
     """
-    url, user, pw = _qbt_config()
-    async with QBittorrentClient(url, user, pw) as client:
-        torrents = await client.get_torrents()
-        torrent = _find_torrent(torrents, query)
-        if not torrent:
-            return f"No torrent matching '{query}'"
+    client = _torrent_client()
+    torrents = await client.get_torrents()
+    torrent = _find_torrent(torrents, query)
+    if not torrent:
+        return f"No torrent matching '{query}'"
 
-        h = torrent["hash"]
-        files = await client.get_torrent_files(h)
+    h = torrent["hash"]
+    files = await client.get_torrent_files(h)
 
     state = STATE_MAP.get(torrent.get("state", ""), torrent.get("state", ""))
     progress = torrent.get("progress", 0)
-    save_path = config.to_host_path(
-        torrent.get("save_path") or torrent.get("content_path", "")
-    )
+    save_path = torrent.get("save_path") or torrent.get("content_path", "")
 
     lines = [
         f"Name:       {torrent.get('name')}",
@@ -388,36 +383,35 @@ async def qbt_info(query: str) -> str:
 
 @mcp.tool()
 async def qbt_delete(hashes: list[str], delete_files: bool = False) -> str:
-    """Delete one or more torrents from qBittorrent.
+    """Delete one or more torrents from torrent client.
 
     Args:
         hashes: List of torrent info hashes (or prefixes) to delete
         delete_files: Also delete downloaded files from disk
     """
-    url, user, pw = _qbt_config()
-    async with QBittorrentClient(url, user, pw) as client:
-        torrents = await client.get_torrents()
+    client = _torrent_client()
+    torrents = await client.get_torrents()
 
-        resolved: list[str] = []
-        lines: list[str] = []
-        for h in hashes:
-            match = _find_torrent(torrents, h)
-            if match:
-                resolved.append(match["hash"])
+    resolved: list[str] = []
+    lines: list[str] = []
+    for h in hashes:
+        match = _find_torrent(torrents, h)
+        if match:
+            resolved.append(match["hash"])
+        else:
+            lines.append(f"No torrent matching: {h}")
+
+    if resolved:
+        await client.delete_torrents(resolved, delete_files=delete_files)
+        remaining = await client.get_torrents()
+        remaining_hashes = {t.get("hash") for t in remaining}
+
+        action = "Deleted" if not delete_files else "Deleted with files"
+        for full_hash in resolved:
+            if full_hash in remaining_hashes:
+                lines.append(f"Failed to delete: {full_hash[:12]}")
             else:
-                lines.append(f"No torrent matching: {h}")
-
-        if resolved:
-            await client.delete_torrents(resolved, delete_files=delete_files)
-            remaining = await client.get_torrents()
-            remaining_hashes = {t.get("hash") for t in remaining}
-
-            action = "Deleted" if not delete_files else "Deleted with files"
-            for full_hash in resolved:
-                if full_hash in remaining_hashes:
-                    lines.append(f"Failed to delete: {full_hash[:12]}")
-                else:
-                    lines.append(f"{action}: {full_hash[:12]}")
+                lines.append(f"{action}: {full_hash[:12]}")
 
     return "\n".join(lines)
 
@@ -435,64 +429,63 @@ async def qbt_wait(query: str, timeout: int = 1800) -> str:
         query: Torrent hash (or prefix) or name substring
         timeout: Seconds to wait (default 1800, min 60, max 1800)
     """
-    url, user, pw = _qbt_config()
+    client = _torrent_client()
     timeout = min(max(timeout, 60), 1800)
     interval = 10
 
-    async with QBittorrentClient(url, user, pw) as client:
+    torrents = await client.get_torrents()
+    torrent = _find_torrent(torrents, query)
+    if not torrent:
+        return f"No torrent matching '{query}'"
+
+    t_hash = torrent["hash"]
+    name = torrent.get("name", t_hash[:12])
+
+    elapsed = 0
+    ever_had_seeders = False
+    last_status = ""
+    while elapsed < timeout:
         torrents = await client.get_torrents()
-        torrent = _find_torrent(torrents, query)
+        torrent = _find_torrent(torrents, t_hash)
         if not torrent:
-            return f"No torrent matching '{query}'"
+            return f"ERROR: Torrent disappeared: {name} ({t_hash[:12]})"
 
-        t_hash = torrent["hash"]
-        name = torrent.get("name", t_hash[:12])
+        state = torrent.get("state", "")
+        progress = torrent.get("progress", 0)
+        dlspeed = torrent.get("dlspeed", 0)
+        eta = torrent.get("eta", 0)
+        num_seeds = torrent.get("num_seeds", 0)
+        friendly_state = STATE_MAP.get(state, state)
 
-        elapsed = 0
-        ever_had_seeders = False
-        last_status = ""
-        while elapsed < timeout:
-            torrents = await client.get_torrents()
-            torrent = _find_torrent(torrents, t_hash)
-            if not torrent:
-                return f"ERROR: Torrent disappeared: {name} ({t_hash[:12]})"
+        if num_seeds > 0:
+            ever_had_seeders = True
 
-            state = torrent.get("state", "")
-            progress = torrent.get("progress", 0)
-            dlspeed = torrent.get("dlspeed", 0)
-            eta = torrent.get("eta", 0)
-            num_seeds = torrent.get("num_seeds", 0)
-            friendly_state = STATE_MAP.get(state, state)
+        last_status = (
+            f"{format_progress(progress)}  "
+            f"{format_size(dlspeed)}/s  "
+            f"ETA {_format_eta(eta)}  "
+            f"Seeds {num_seeds}  "
+            f"[{friendly_state}]"
+        )
 
-            if num_seeds > 0:
-                ever_had_seeders = True
+        if state in _DONE_STATES and (ever_had_seeders or progress >= 1.0):
+            return f"Complete: {name} ({t_hash[:12]})\n{last_status}"
 
-            last_status = (
-                f"{format_progress(progress)}  "
-                f"{format_size(dlspeed)}/s  "
-                f"ETA {_format_eta(eta)}  "
-                f"Seeds {num_seeds}  "
-                f"[{friendly_state}]"
+        if state in _ERROR_STATES:
+            return f"ERROR: {name} state={friendly_state} ({t_hash[:12]})\n{last_status}"
+
+        if elapsed >= _NO_SEEDERS_TIMEOUT and not ever_had_seeders and progress < 1.0:
+            return (
+                f"DEAD TORRENT: {name} — no seeders connected after "
+                f"{_NO_SEEDERS_TIMEOUT // 60} minutes ({t_hash[:12]})\n{last_status}"
             )
 
-            if state in _DONE_STATES and (ever_had_seeders or progress >= 1.0):
-                return f"Complete: {name} ({t_hash[:12]})\n{last_status}"
+        await asyncio.sleep(interval)
+        elapsed += interval
 
-            if state in _ERROR_STATES:
-                return f"ERROR: {name} state={friendly_state} ({t_hash[:12]})\n{last_status}"
-
-            if elapsed >= _NO_SEEDERS_TIMEOUT and not ever_had_seeders and progress < 1.0:
-                return (
-                    f"DEAD TORRENT: {name} — no seeders connected after "
-                    f"{_NO_SEEDERS_TIMEOUT // 60} minutes ({t_hash[:12]})\n{last_status}"
-                )
-
-            await asyncio.sleep(interval)
-            elapsed += interval
-
-        return (
-            f"TIMEOUT after {timeout}s: {name} ({t_hash[:12]})\n{last_status}"
-        )
+    return (
+        f"TIMEOUT after {timeout}s: {name} ({t_hash[:12]})\n{last_status}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -584,12 +577,12 @@ async def torrent_add(
     category: Optional[str] = None,
     tag: Optional[str] = None,
 ) -> str:
-    """Add a torrent search result to qBittorrent for downloading.
+    """Add a torrent search result to torrent client for downloading.
 
     Args:
         ref: Search result reference in format "search_id:number" (e.g. "a3f2c1:3")
-        category: qBittorrent category (e.g. "mm-tv", "mm-movie")
-        tag: qBittorrent tag for tracking this download
+        category: torrent client category (e.g. "mm-tv", "mm-movie")
+        tag: torrent client tag for tracking this download
     """
     if ":" not in ref:
         return f"Error: expected format <search-id>:<number>, got '{ref}'"
@@ -613,10 +606,12 @@ async def torrent_add(
     magnet = result.get("MagnetUri") or result.get("magneturi")
     link = result.get("Link")
 
+    tracker_id = result.get("TrackerId")
+
     if magnet:
         source = magnet
     elif link:
-        resolved = await torrent_resolve_link(link)
+        resolved = await torrent_resolve_link(link, tracker_id=tracker_id)
         if isinstance(resolved, str):
             source = resolved
         else:
@@ -631,65 +626,48 @@ async def torrent_add(
         save_path = str(Path(tempfile.gettempdir()) / "media-box" / "downloads")
         Path(save_path).mkdir(parents=True, exist_ok=True)
 
-    qbt_url, qbt_user, qbt_pw = _qbt_config()
-    async with QBittorrentClient(qbt_url, qbt_user, qbt_pw) as qbt:
-        await qbt.add_torrent(
-            source,
-            save_path=config.to_container_path(save_path),
-            category=category,
-            tag=tag,
-        )
+    client = _torrent_client()
+    t_hash = await client.add_torrent(
+        source,
+        save_path=save_path,
+        category=category,
+        tag=tag,
+    )
 
-        # Find the torrent in qBittorrent so we can wait for seeders
-        t_hash = None
-        if source.startswith("magnet:"):
-            t_hash = _hash_from_magnet(source)
+    # Wait for the torrent to appear and get at least one seeder
+    interval = 5
+    elapsed = 0
+    while elapsed < _NO_SEEDERS_TIMEOUT:
+        torrents = await client.get_torrents()
+        torrent = _find_torrent(torrents, t_hash)
+        if not torrent:
+            if elapsed < 15:
+                await asyncio.sleep(interval)
+                elapsed += interval
+                continue
+            return f"ERROR: Torrent not found in torrent client after adding: {title}"
 
-        # If we couldn't parse the hash, search by tag or name
-        if not t_hash:
-            await asyncio.sleep(2)
-            torrents = await qbt.get_torrents(tag=tag) if tag else await qbt.get_torrents()
-            torrent = _find_torrent(torrents, title.lower()[:20])
-            if torrent:
-                t_hash = torrent["hash"]
+        state = torrent.get("state", "")
+        num_seeds = torrent.get("num_seeds", 0)
+        progress = torrent.get("progress", 0)
 
-        if not t_hash:
-            return f"Added to qBittorrent: {title} (could not confirm seeder status)"
+        if state in _ERROR_STATES:
+            friendly = STATE_MAP.get(state, state)
+            return f"ERROR adding {title}: state={friendly} ({t_hash[:12]})"
 
-        # Wait for the torrent to appear and get at least one seeder
-        interval = 5
-        elapsed = 0
-        while elapsed < _NO_SEEDERS_TIMEOUT:
-            torrents = await qbt.get_torrents()
-            torrent = _find_torrent(torrents, t_hash)
-            if not torrent:
-                if elapsed < 15:
-                    await asyncio.sleep(interval)
-                    elapsed += interval
-                    continue
-                return f"ERROR: Torrent not found in qBittorrent after adding: {title}"
+        if num_seeds > 0 or progress >= 1.0:
+            return (
+                f"Added to torrent client: {title} ({t_hash[:12]})\n"
+                f"Seeds: {num_seeds}  Progress: {format_progress(progress)}"
+            )
 
-            state = torrent.get("state", "")
-            num_seeds = torrent.get("num_seeds", 0)
-            progress = torrent.get("progress", 0)
+        await asyncio.sleep(interval)
+        elapsed += interval
 
-            if state in _ERROR_STATES:
-                friendly = STATE_MAP.get(state, state)
-                return f"ERROR adding {title}: state={friendly} ({t_hash[:12]})"
-
-            if num_seeds > 0 or progress >= 1.0:
-                return (
-                    f"Added to qBittorrent: {title} ({t_hash[:12]})\n"
-                    f"Seeds: {num_seeds}  Progress: {format_progress(progress)}"
-                )
-
-            await asyncio.sleep(interval)
-            elapsed += interval
-
-        return (
-            f"DEAD TORRENT: {title} — no seeders connected after "
-            f"{_NO_SEEDERS_TIMEOUT // 60} minutes ({t_hash[:12]})"
-        )
+    return (
+        f"DEAD TORRENT: {title} — no seeders connected after "
+        f"{_NO_SEEDERS_TIMEOUT // 60} minutes ({t_hash[:12]})"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -953,13 +931,12 @@ async def _cleanup_torrent(torrent_hash: str) -> str:
     url, user, pw = config.require_env(
         "QBITTORRENT_URL", "QBITTORRENT_USERNAME", "QBITTORRENT_PASSWORD"
     )
-    async with QBittorrentClient(url, user, pw) as client:
-        torrents = await client.get_torrents()
-        match = _find_torrent(torrents, torrent_hash)
-        if not match:
-            return f"No torrent matching: {torrent_hash}"
-        full_hash = match["hash"]
-        await client.delete_torrent(full_hash, delete_files=True)
+    torrents = await client.get_torrents()
+    match = _find_torrent(torrents, torrent_hash)
+    if not match:
+        return f"No torrent matching: {torrent_hash}"
+    full_hash = match["hash"]
+    await client.delete_torrent(full_hash, delete_files=True)
     return f"Deleted torrent {full_hash[:12]} and remaining files"
 
 

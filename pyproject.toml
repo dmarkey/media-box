@@ -9,8 +9,9 @@ description = "MCP server for managing Jellyfin, qBittorrent, torrent search (py
 requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.9",
+    "libtorrent>=2.0.11",
     "mcp[cli]>=1.0",
-    "pyackett[cloudflare]>=0.1.0",
+    "pyackett[cloudflare]>=0.2.0",
 ]
 
 [tool.hatch.build.targets.wheel]
