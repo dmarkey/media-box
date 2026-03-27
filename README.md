@@ -1,6 +1,6 @@
 # media-box
 
-An MCP (Model Context Protocol) server for managing a home media stack — Jellyfin, qBittorrent, Jackett, and TVMaze. Gives LLM agents the ability to search for media, download torrents, organize files with Jellyfin naming conventions, and refresh libraries — all through a single set of tools.
+An MCP (Model Context Protocol) server for managing a home media stack — Jellyfin, qBittorrent, torrent search, and TVMaze. Gives LLM agents the ability to search for media, download torrents, organize files with Jellyfin naming conventions, and refresh libraries — all through a single set of tools.
 
 ## What it does
 
@@ -8,7 +8,7 @@ An LLM connected to this server can handle requests like *"download Breaking Bad
 
 1. Check if it already exists in Jellyfin
 2. Look up episode metadata on TVMaze
-3. Search for torrents via Jackett
+3. Search for torrents across multiple indexers (with Cloudflare bypass)
 4. Add the best result to qBittorrent
 5. Wait for the download to complete
 6. Move and rename files to match Jellyfin conventions
@@ -23,30 +23,78 @@ The server exposes 19 tools across five services. It ships with an `instructions
 - Running instances of:
   - [Jellyfin](https://jellyfin.org/) media server
   - [qBittorrent](https://www.qbittorrent.org/) with Web UI enabled
-  - [Jackett](https://github.com/Jackett/Jackett) torrent indexer proxy
 - Internet access for [TVMaze](https://www.tvmaze.com/api) (public API, no key needed)
+
+Torrent search is built in via [pyackett](https://github.com/dmarkey/pyackett) — no separate Jackett server needed.
 
 ## Configuration
 
 Create a config file at `~/.config/media-box/config`:
 
 ```ini
+# Jellyfin
 JELLYFIN_URL=http://localhost:8096
 JELLYFIN_API_KEY=your-jellyfin-api-key
 
+# qBittorrent
 QBITTORRENT_URL=http://localhost:8080
 QBITTORRENT_USERNAME=admin
 QBITTORRENT_PASSWORD=your-password
 
-JACKETT_URL=http://localhost:9117
-JACKETT_API_KEY=your-jackett-api-key
+# Torrent search — comma-separated list of indexer IDs
+TORRENT_INDEXERS=1337x,therarbg,thepiratebay,limetorrents,torrentproject2
 
+# Proxy for torrent sites (optional, recommended for Cloudflare-protected sites)
+TORRENT_PROXY=socks5://user:pass@host:1080
+
+# Storage paths
 TEMP_DOWNLOAD_LOCATION=/path/to/downloads
 TV_SHOWS_SAVE_LOCATION=/path/to/jellyfin/tv
 MOVIES_SAVE_LOCATION=/path/to/jellyfin/movies
 ```
 
 Alternatively, set these as environment variables. The server checks the config file first, then falls back to env vars.
+
+### Torrent indexers
+
+Public indexers that work well (no account needed):
+
+| Indexer ID | Site | Notes |
+|---|---|---|
+| `1337x` | 1337x.to | Large, general. Cloudflare protected. |
+| `thepiratebay` | thepiratebay.org | The classic. JSON API. |
+| `therarbg` | therarbg.to | RarBG successor. JSON API. |
+| `limetorrents` | limetorrents.fun | General. |
+| `torrentproject2` | torrentproject2.net | Meta-search, high result count. |
+| `kickasstorrents-ws` | kickass.ws | KAT clone. Cloudflare protected. |
+| `eztv` | eztvx.to | TV-focused. Cloudflare protected. |
+| `torrentdownload` | torrentdownload.info | General. |
+
+Sites behind Cloudflare are handled automatically via [Camoufox](https://github.com/daijro/camoufox) (anti-detect Firefox). The first search to a CF-protected site takes ~5 seconds to solve the challenge; subsequent searches reuse the cached cookie.
+
+### Private trackers
+
+Private trackers need credentials. Add them to the config file using the indexer ID as a prefix:
+
+```ini
+# IPTorrents (cookie auth)
+TORRENT_INDEXERS=1337x,therarbg,iptorrents
+IPTORRENTS_COOKIE=uid=123456; pass=abcdef123456
+IPTORRENTS_USERAGENT=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ...
+```
+
+Then in `torrents.py`, pass the credentials when configuring:
+
+```python
+await pk.configure_indexer("iptorrents", {
+    "cookie": config.get_env("IPTORRENTS_COOKIE"),
+    "useragent": config.get_env("IPTORRENTS_USERAGENT"),
+})
+```
+
+> **Note:** Private tracker support currently requires a code change to pass credentials. A future update will add automatic credential loading from config.
+
+To find the cookie: open the tracker in your browser → DevTools → Application → Cookies → copy the full cookie string.
 
 ### Optional: qBittorrent path mapping
 
@@ -145,12 +193,12 @@ The `qbt_wait` tool blocks until a torrent finishes downloading, which can take 
 | `qbt_wait` | Block until a torrent completes, errors, or times out (default 30 min) |
 | `qbt_delete` | Delete one or more torrents by hash, optionally removing downloaded files |
 
-### Jackett
+### Torrent Search
 
 | Tool | Description |
 |------|-------------|
-| `jackett_search` | Search for torrents across all configured indexers, with category and sort options |
-| `jackett_add` | Add a search result to qBittorrent by reference (e.g. `"a3f2c1:3"`) |
+| `torrent_search` | Search for torrents across configured indexers, with category and sort options |
+| `torrent_add` | Add a search result to qBittorrent by reference (e.g. `"a3f2c1:3"`) |
 
 ### TVMaze
 
