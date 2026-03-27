@@ -19,7 +19,7 @@ from .formatting import (
 )
 from .jellyfin import JellyfinClient
 from .qbittorrent import QBittorrentClient, STATE_MAP
-from .jackett import CATEGORY_MAP, JackettClient, SEARCH_DIR
+from .torrents import CATEGORY_MAP, SEARCH_DIR, search as torrent_search_fn, resolve_link as torrent_resolve_link
 from .tvmaze import TVMazeClient
 from .mover import MEDIA_EXTENSIONS
 
@@ -43,8 +43,6 @@ def _qbt_config() -> tuple[str, str, str]:
     )
 
 
-def _jackett_config() -> tuple[str, str]:
-    return tuple(config.require_env("JACKETT_URL", "JACKETT_API_KEY"))  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
@@ -498,7 +496,7 @@ async def qbt_wait(query: str, timeout: int = 1800) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Jackett tools
+# Torrent search tools
 # ---------------------------------------------------------------------------
 
 
@@ -528,13 +526,13 @@ def _load_search(search_id: str) -> dict:
 
 
 @mcp.tool()
-async def jackett_search(
+async def torrent_search(
     query: str,
     category: Optional[str] = None,
     limit: Optional[int] = None,
     sort: str = "seeders",
 ) -> str:
-    """Search for torrents using Jackett.
+    """Search for torrents across configured indexers.
 
     Args:
         query: Search term (e.g. "The Matrix 1999", "Breaking Bad S03")
@@ -542,12 +540,10 @@ async def jackett_search(
         limit: Maximum number of results to return
         sort: Sort results by "seeders" (default) or "size"
     """
-    url, key = _jackett_config()
     cat_id = CATEGORY_MAP.get(category) if category else None
     search_limit = limit or 50
 
-    async with JackettClient(url, key) as client:
-        results = await client.search(query, category=cat_id, limit=search_limit)
+    results = await torrent_search_fn(query, category=cat_id, limit=search_limit)
 
     results.sort(
         key=lambda r: r.get("Seeders" if sort == "seeders" else "Size", 0),
@@ -579,16 +575,16 @@ async def jackett_search(
         ("Indexer", "indexer", 15),
     ])
 
-    return f"{table}\n\nSearch ID: {search_id}  ({len(results)} results)\nTo add: use jackett_add with ref \"{search_id}:<number>\""
+    return f"{table}\n\nSearch ID: {search_id}  ({len(results)} results)\nTo add: use torrent_add with ref \"{search_id}:<number>\""
 
 
 @mcp.tool()
-async def jackett_add(
+async def torrent_add(
     ref: str,
     category: Optional[str] = None,
     tag: Optional[str] = None,
 ) -> str:
-    """Add a Jackett search result to qBittorrent for downloading.
+    """Add a torrent search result to qBittorrent for downloading.
 
     Args:
         ref: Search result reference in format "search_id:number" (e.g. "a3f2c1:3")
@@ -617,13 +613,10 @@ async def jackett_add(
     magnet = result.get("MagnetUri") or result.get("magneturi")
     link = result.get("Link")
 
-    jackett_url, jackett_key = _jackett_config()
-
     if magnet:
         source = magnet
     elif link:
-        async with JackettClient(jackett_url, jackett_key) as client:
-            resolved = await client.resolve_link(link)
+        resolved = await torrent_resolve_link(link)
         if isinstance(resolved, str):
             source = resolved
         else:

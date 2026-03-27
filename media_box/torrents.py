@@ -1,0 +1,91 @@
+"""Torrent search via pyackett (native Python, no server needed)."""
+
+import tempfile
+from pathlib import Path
+from typing import Any, Optional
+
+from . import config
+
+CATEGORY_MAP = {"movies": 2000, "tv": 5000}
+SEARCH_DIR = Path(tempfile.gettempdir()) / "media-box" / "searches"
+
+# ---------------------------------------------------------------------------
+# Singleton pyackett instance
+# ---------------------------------------------------------------------------
+
+_pyackett_instance = None
+
+
+async def _get_pyackett():
+    """Get or create the singleton Pyackett instance."""
+    global _pyackett_instance
+    if _pyackett_instance is not None:
+        return _pyackett_instance
+
+    indexers_str = config.TORRENT_INDEXERS
+    if not indexers_str:
+        raise RuntimeError(
+            "No torrent indexers configured. Set TORRENT_INDEXERS in config "
+            "(e.g. TORRENT_INDEXERS=1337x,therarbg,thepiratebay)"
+        )
+
+    indexers = [s.strip() for s in indexers_str.split(",") if s.strip()]
+
+    from pyackett import Pyackett
+
+    pk = Pyackett(proxy=config.TORRENT_PROXY)
+    pk.load_definitions_from_github("jackett")
+
+    for idx_id in indexers:
+        await pk.configure_indexer(idx_id, {})
+
+    _pyackett_instance = pk
+    return pk
+
+
+async def search(
+    query: str,
+    category: Optional[int] = None,
+    limit: Optional[int] = None,
+) -> list[dict[str, Any]]:
+    """Search for torrents via pyackett."""
+    from pyackett.core.models import TorznabQuery
+
+    pk = await _get_pyackett()
+
+    tq = TorznabQuery(
+        search_term=query,
+        categories=[category] if category else [],
+        limit=limit or 100,
+    )
+
+    results = await pk.manager.search(tq)
+
+    return [
+        {
+            "Title": r.title,
+            "Guid": r.guid,
+            "Link": r.link,
+            "Details": r.details,
+            "PublishDate": r.publish_date.isoformat() if r.publish_date else None,
+            "Category": r.category,
+            "Size": r.size,
+            "Seeders": r.seeders,
+            "Peers": r.peers,
+            "MagnetUri": r.magnet_uri,
+            "InfoHash": r.info_hash,
+            "Tracker": r.origin_name,
+        }
+        for r in results
+        if (r.seeders or 0) > 0
+    ]
+
+
+async def resolve_link(link: str) -> str | bytes:
+    """Resolve a download link via pyackett's HTTP client."""
+    pk = await _get_pyackett()
+    resp = await pk._client.get(link)
+    content_type = resp.headers.get("content-type", "")
+    if "magnet" in content_type or resp.text.startswith("magnet:"):
+        return resp.text
+    return resp.content

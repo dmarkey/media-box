@@ -5,11 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "media-box-mcp"
 version = "0.1.0"
-description = "MCP server for managing Jellyfin, qBittorrent, Jackett, and TVMaze"
+description = "MCP server for managing Jellyfin, qBittorrent, torrent search (pyackett), and TVMaze"
 requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.9",
     "mcp[cli]>=1.0",
+    "pyackett[cloudflare]>=0.1.0",
 ]
 
 [tool.hatch.build.targets.wheel]
