@@ -1003,15 +1003,13 @@ def _copy_file(source: Path, dest: Path, *, force: bool = False) -> str:
 
 
 async def _cleanup_torrent(torrent_hash: str) -> str:
-    url, user, pw = config.require_env(
-        "QBITTORRENT_URL", "QBITTORRENT_USERNAME", "QBITTORRENT_PASSWORD"
-    )
+    client = _torrent_client()
     torrents = await client.get_torrents()
     match = _find_torrent(torrents, torrent_hash)
     if not match:
         return f"No torrent matching: {torrent_hash}"
     full_hash = match["hash"]
-    await client.delete_torrent(full_hash, delete_files=True)
+    await client.remove_torrent(full_hash, delete_files=True)
     return f"Deleted torrent {full_hash[:12]} and remaining files"
 
 
