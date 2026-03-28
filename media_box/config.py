@@ -130,6 +130,7 @@ TORRENT_SEED_RATIO = get_env("TORRENT_SEED_RATIO")  # stop seeding at ratio (def
 TORRENT_SEED_TIME = get_env("TORRENT_SEED_TIME")  # stop seeding after minutes (default: 60)
 TORRENT_ANONYMOUS_MODE = get_env("TORRENT_ANONYMOUS_MODE")  # true/false (default: false)
 TORRENT_PROXY_URL = get_env("TORRENT_PROXY_URL")  # socks5://host:port for libtorrent peer traffic
+TORRENT_STALL_TIMEOUT = get_env("TORRENT_STALL_TIMEOUT")  # seconds before removing a torrent with no seeders (default: 120)
 
 # Storage
 TEMP_DOWNLOAD_LOCATION = get_env("TEMP_DOWNLOAD_LOCATION", "TEMPORARY_DOWNLOAD_LOCATION")

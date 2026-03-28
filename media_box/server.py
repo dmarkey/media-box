@@ -286,7 +286,7 @@ def _find_torrent(torrents: list[dict], query: str) -> Optional[dict]:
 
 _DONE_STATES = {"uploading", "stalledUP", "pausedUP"}
 _ERROR_STATES = {"error", "missingFiles"}
-_NO_SEEDERS_TIMEOUT = 300
+_NO_SEEDERS_TIMEOUT = int(config.get_env("TORRENT_STALL_TIMEOUT") or 120)
 _last_search_id: Optional[str] = None
 
 
@@ -493,7 +493,11 @@ async def torrent_download(
             return f"ERROR: {name} — {friendly} ({t_hash[:12]})"
 
         if elapsed >= _NO_SEEDERS_TIMEOUT and not ever_had_seeders and progress < 1.0:
-            return f"DEAD TORRENT: {name} — no seeders after {_NO_SEEDERS_TIMEOUT // 60}min ({t_hash[:12]})"
+            await client.remove_torrent(t_hash, delete_files=True)
+            return (
+                f"DEAD TORRENT (removed): {name} — no seeders after {_NO_SEEDERS_TIMEOUT}s ({t_hash[:12]}). "
+                f"Try the next search result, or re-search with a different indexer."
+            )
 
         await asyncio.sleep(interval)
         elapsed += interval
@@ -667,7 +671,12 @@ async def torrent_wait(query: str, timeout: int = 1800) -> str:
             return f"ERROR: {name} — {STATE_MAP.get(state, state)}"
 
         if elapsed >= _NO_SEEDERS_TIMEOUT and not ever_had_seeders and progress < 1.0:
-            return f"DEAD TORRENT: {name} — no seeders after {_NO_SEEDERS_TIMEOUT // 60}min"
+            client = _torrent_client()
+            await client.remove_torrent(t_hash, delete_files=True)
+            return (
+                f"DEAD TORRENT (removed): {name} — no seeders after {_NO_SEEDERS_TIMEOUT}s ({t_hash[:12]}). "
+                f"Try the next search result, or re-search with a different indexer."
+            )
 
         await asyncio.sleep(interval)
         elapsed += interval
