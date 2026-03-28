@@ -684,6 +684,23 @@ async def torrent_wait(query: str, timeout: int = 1800) -> str:
     return f"TIMEOUT after {timeout}s: {name} ({t_hash[:12]})\n{last_status}"
 
 
+@mcp.tool()
+async def torrent_logs(limit: int = 100) -> str:
+    """Show recent libtorrent engine logs for diagnosing torrent issues
+    (connectivity, port mapping, peer errors, etc.). Only use when the user
+    asks to troubleshoot torrent problems.
+
+    Args:
+        limit: Number of recent log entries to return (default 100)
+    """
+    client = _torrent_client()
+    client._process_alerts(timeout=0.5)
+    entries = client.get_logs(limit=limit)
+    if not entries:
+        return "No log entries yet."
+    return "\n".join(entries)
+
+
 # ---------------------------------------------------------------------------
 # TVMaze tools
 # ---------------------------------------------------------------------------

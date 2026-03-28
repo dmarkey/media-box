@@ -9,6 +9,7 @@ across MCP server restarts.
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import os
@@ -113,7 +114,13 @@ class TorrentClient:
             "download_rate_limit": int(config.TORRENT_DOWNLOAD_RATE_LIMIT or 0),
             "upload_rate_limit": int(config.TORRENT_UPLOAD_RATE_LIMIT or 1024 * 1024),  # 1 MB/s
             "anonymous_mode": _bool(config.TORRENT_ANONYMOUS_MODE, False),
-            "alert_mask": lt.alert.category_t.status_notification | lt.alert.category_t.error_notification,
+            "alert_mask": (
+                lt.alert.category_t.status_notification
+                | lt.alert.category_t.error_notification
+                | lt.alert.category_t.port_mapping_notification
+                | lt.alert.category_t.peer_notification
+                | lt.alert.category_t.storage_notification
+            ),
         }
 
         # Encryption forced by default for privacy
@@ -143,6 +150,9 @@ class TorrentClient:
         self._max_uploads_per_torrent = int(config.TORRENT_MAX_UPLOADS_PER_TORRENT or -1)
 
         self._handles: dict[str, lt.torrent_handle] = {}
+
+        # Ring buffer for libtorrent alerts (kept for diagnostic tool)
+        self._alert_log: collections.deque[str] = collections.deque(maxlen=500)
 
         # Restore previous torrents
         self._restore_torrents()
@@ -207,6 +217,9 @@ class TorrentClient:
         self._session.wait_for_alert(int(timeout * 1000))
         alerts = self._session.pop_alerts()
         for alert in alerts:
+            # Log every alert to the ring buffer for diagnostics
+            self._alert_log.append(f"[{time.strftime('%H:%M:%S')}] {alert.what()}: {alert.message()}")
+
             if isinstance(alert, lt.save_resume_data_alert):
                 h = alert.handle
                 info_hash = str(h.info_hash())
@@ -215,6 +228,10 @@ class TorrentClient:
                 resume_path.write_bytes(resume_data)
             elif isinstance(alert, lt.save_resume_data_failed_alert):
                 pass  # torrent was removed or has no metadata yet
+
+    def get_logs(self, limit: int = 100) -> list[str]:
+        """Return the most recent libtorrent alert log entries."""
+        return list(self._alert_log)[-limit:]
 
     def _restore_torrents(self):
         """Restore torrents from saved resume data or magnet URIs."""
