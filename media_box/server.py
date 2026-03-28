@@ -489,8 +489,14 @@ async def torrent_download(
             )
 
         if state in _ERROR_STATES:
-            friendly = STATE_MAP.get(state, state)
-            return f"ERROR: {name} — {friendly} ({t_hash[:12]})"
+            error_detail = torrent.get("error", "")
+            error_msg = f"ERROR: {name} ({t_hash[:12]})"
+            if error_detail:
+                error_msg += f"\nReason: {error_detail}"
+            else:
+                error_msg += f"\nState: {STATE_MAP.get(state, state)}"
+            error_msg += "\nCheck save_path is writable and has enough disk space. Use torrent_logs() for more detail."
+            return error_msg
 
         if elapsed >= _NO_SEEDERS_TIMEOUT and not ever_had_seeders and progress < 1.0:
             await client.remove_torrent(t_hash, delete_files=True)
@@ -668,7 +674,14 @@ async def torrent_wait(query: str, timeout: int = 1800) -> str:
             return f"Complete: {name} ({t_hash[:12]})\n{last_status}\nSave path: {save}"
 
         if state in _ERROR_STATES:
-            return f"ERROR: {name} — {STATE_MAP.get(state, state)}"
+            error_detail = torrent.get("error", "")
+            error_msg = f"ERROR: {name} ({t_hash[:12]})"
+            if error_detail:
+                error_msg += f"\nReason: {error_detail}"
+            else:
+                error_msg += f"\nState: {STATE_MAP.get(state, state)}"
+            error_msg += "\nCheck save_path is writable and has enough disk space. Use torrent_logs() for more detail."
+            return error_msg
 
         if elapsed >= _NO_SEEDERS_TIMEOUT and not ever_had_seeders and progress < 1.0:
             client = _torrent_client()

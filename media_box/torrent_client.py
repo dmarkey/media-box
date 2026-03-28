@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import csv
+import io
 import json
 import logging
 import os
@@ -161,6 +163,9 @@ class TorrentClient:
             f"{len(self._handles)} resumed torrents)"
         )
 
+        # Start background status writer
+        self._status_task = asyncio.ensure_future(self._write_status_loop())
+
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
@@ -232,6 +237,35 @@ class TorrentClient:
     def get_logs(self, limit: int = 100) -> list[str]:
         """Return the most recent libtorrent alert log entries."""
         return list(self._alert_log)[-limit:]
+
+    async def _write_status_loop(self):
+        """Write torrents.csv and logs.txt to state_dir every 30 seconds."""
+        while True:
+            await asyncio.sleep(30)
+            try:
+                self._process_alerts(timeout=0.1)
+
+                # Write logs.txt
+                logs_path = self._state_dir / "logs.txt"
+                logs_path.write_text("\n".join(self._alert_log) + "\n")
+
+                # Write torrents.csv
+                torrents = await self.get_torrents()
+                csv_path = self._state_dir / "torrents.csv"
+                buf = io.StringIO()
+                fields = [
+                    "hash", "name", "state", "progress", "dlspeed", "upspeed",
+                    "eta", "num_seeds", "num_peers", "size", "downloaded",
+                    "uploaded", "ratio", "save_path", "category", "error",
+                ]
+                writer = csv.DictWriter(buf, fieldnames=fields, extrasaction="ignore")
+                writer.writeheader()
+                for t in torrents:
+                    writer.writerow(t)
+                csv_path.write_text(buf.getvalue())
+
+            except Exception as e:
+                logger.debug(f"Status write failed: {e}")
 
     def _restore_torrents(self):
         """Restore torrents from saved resume data or magnet URIs."""
@@ -388,6 +422,19 @@ class TorrentClient:
             elif status.is_seeding:
                 state_str = "seeding"
 
+            # Capture error message from libtorrent if present
+            error_msg = ""
+            if hasattr(status, "errc") and status.errc.value() != 0:
+                error_msg = status.errc.message()
+                if hasattr(status, "error_file") and status.error_file >= 0:
+                    try:
+                        ti = handle.torrent_file()
+                        if ti:
+                            error_msg = f"{error_msg} (file: {ti.files().file_path(status.error_file)})"
+                    except Exception:
+                        pass
+                state_str = "error"
+
             # Friendly state for qbt compat
             if state_str == "downloading" and status.num_seeds == 0:
                 friendly_state = "stalledDL"
@@ -432,6 +479,7 @@ class TorrentClient:
                 "tags": meta.get("tags", ""),
                 "added_on": meta.get("added_on", 0),
                 "completion_on": meta.get("completed_on", 0),
+                "error": error_msg,
             })
 
         return results
