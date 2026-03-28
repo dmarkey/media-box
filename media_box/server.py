@@ -42,6 +42,9 @@ def _torrent_client() -> TorrentClient:
     return get_torrent_client(default_save_path=save_path)
 
 
+# Start the torrent client eagerly so libtorrent begins listening immediately.
+_torrent_client()
+
 
 
 # ---------------------------------------------------------------------------
