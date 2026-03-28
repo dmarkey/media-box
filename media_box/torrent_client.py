@@ -163,8 +163,8 @@ class TorrentClient:
             f"{len(self._handles)} resumed torrents)"
         )
 
-        # Start background status writer
-        self._status_task = asyncio.ensure_future(self._write_status_loop())
+        # Background status writer (started lazily when event loop is available)
+        self._status_task = None
 
     # ------------------------------------------------------------------
     # Persistence
@@ -217,8 +217,18 @@ class TorrentClient:
                         resume_data = lt.write_resume_data_buf(alert.params)
                         resume_path.write_bytes(resume_data)
 
+    def _ensure_status_writer(self):
+        """Start the background status writer if not already running."""
+        if self._status_task is None or self._status_task.done():
+            try:
+                loop = asyncio.get_running_loop()
+                self._status_task = loop.create_task(self._write_status_loop())
+            except RuntimeError:
+                pass  # no event loop yet
+
     def _process_alerts(self, timeout: float = 0.1):
         """Process libtorrent alerts (saves resume data to disk)."""
+        self._ensure_status_writer()
         self._session.wait_for_alert(int(timeout * 1000))
         alerts = self._session.pop_alerts()
         for alert in alerts:

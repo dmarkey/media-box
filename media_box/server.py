@@ -386,6 +386,10 @@ async def torrent_download(
     Resolves the download link, adds to the torrent client, and optionally
     waits for the download to complete.
 
+    IMPORTANT: This tool blocks until the download completes (can take minutes
+    to hours). ALWAYS call this from a subagent/background task, never in the
+    main conversation thread — it will freeze the chat.
+
     Args:
         number: Result number from torrent_search (e.g. 1, 2, 3)
         wait: Wait for download to complete (default True)
@@ -627,6 +631,10 @@ async def torrent_delete(query: str, delete_files: bool = False) -> str:
 @mcp.tool()
 async def torrent_wait(query: str, timeout: int = 1800) -> str:
     """Wait for a torrent to finish downloading.
+
+    IMPORTANT: This tool blocks until the download completes (can take minutes
+    to hours). ALWAYS call this from a subagent/background task, never in the
+    main conversation thread — it will freeze the chat.
 
     Args:
         query: Torrent hash prefix or name substring

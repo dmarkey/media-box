@@ -145,7 +145,7 @@ torrent_download(number=3, category="tv", tag="breaking-bad-s03")
 - By default, `torrent_download` waits for the download to complete
 - For large downloads, use `wait=False` and later call `torrent_wait`
 
-> **CRITICAL — `torrent_download` handles waiting automatically. Do NOT poll in a loop.**
+> **CRITICAL — `torrent_download` and `torrent_wait` are long-running blocking calls (minutes to hours). ALWAYS run them in a subagent or background task, NEVER in the main conversation thread — they will freeze the chat and the user cannot interact until they complete. Do NOT poll in a loop.**
 
 ### Step 6 — Move Files to Final Destination
 
@@ -201,4 +201,5 @@ jellyfin_search(query="Breaking Bad", type="series")
 9. **Handle errors gracefully** — if a search returns nothing, tell the user and suggest alternatives.
 10. **Only use tools listed above** — do not invent or guess tool names.
 11. **Never use `sleep` or manual loops** — `torrent_download` and `torrent_wait` handle waiting. If it times out, call `torrent_wait` again.
-12. **Maximum 2 searches per request** — if two searches return no usable results, stop and ask the user.
+12. **NEVER call `torrent_download` or `torrent_wait` in the main conversation thread** — these block for minutes to hours. Always use a subagent or background task so the user can keep chatting.
+13. **Maximum 2 searches per request** — if two searches return no usable results, stop and ask the user.
