@@ -377,25 +377,27 @@ async def torrent_search(
 @mcp.tool()
 async def torrent_download(
     number: int,
-    timeout: int = 1800,
+    timeout: int = 120,
     category: str = "",
     tag: str = "",
 ) -> str:
     """Download a torrent from the most recent search results.
-    Resolves the download link, adds to the torrent client, and waits for
-    the download to complete before returning.
+    Resolves the download link, adds to the torrent client, and monitors it
+    for up to ~2 minutes to check it's healthy (has seeders, is progressing).
+
+    Returns once the torrent is either:
+    - Complete (small/fast torrents may finish within the window)
+    - Healthy and downloading — tell the user it's downloading and they can
+      check back later with torrent_list / torrent_info
+    - Dead (no seeders found) — auto-removed, suggest trying the next result
+    - Errored — report the error
 
     IMPORTANT: Before downloading, ALWAYS check Jellyfin first (jellyfin_search)
     to confirm the movie/episode is not already in the library. Do not download duplicates.
 
-    WARNING — BLOCKING CALL: This tool waits for the full download to finish,
-    which can take minutes to hours. You MUST call this from a subagent or
-    background task. Calling it in the main conversation thread will freeze
-    the chat and the user cannot interact until it returns.
-
     Args:
         number: Result number from torrent_search (e.g. 1, 2, 3)
-        timeout: Max seconds to wait (default 1800, i.e. 30 minutes)
+        timeout: Max seconds to wait for health check (default 120, i.e. 2 minutes)
         category: Category tag for organizing (e.g. "tv", "movies")
         tag: Custom tag for tracking this download
     """
@@ -449,8 +451,8 @@ async def torrent_download(
         source, save_path=save_path, category=category, tag=tag,
     )
 
-    # Wait for completion
-    timeout = min(max(timeout, 60), 1800)
+    # Monitor torrent health — wait up to timeout to see if it's viable
+    timeout = min(max(timeout, 30), 300)
     interval = 10
     elapsed = 0
     name = title
@@ -484,6 +486,7 @@ async def torrent_download(
             f"Seeds {num_seeds}"
         )
 
+        # Already finished (small/fast torrent)
         if state in _DONE_STATES and (ever_had_seeders or progress >= 1.0):
             save = torrent.get("save_path", save_path)
             return (
@@ -501,8 +504,9 @@ async def torrent_download(
             error_msg += "\nCheck save_path is writable and has enough disk space. Use torrent_logs() for more detail."
             return error_msg
 
+        # No seeders after the stall timeout — dead torrent, remove it
         if elapsed >= _NO_SEEDERS_TIMEOUT and not ever_had_seeders and progress < 1.0:
-            await client.remove_torrent(t_hash, delete_files=True)
+            await client.delete_torrent(t_hash, delete_files=True)
             return (
                 f"DEAD TORRENT (removed): {name} — no seeders after {_NO_SEEDERS_TIMEOUT}s ({t_hash[:12]}). "
                 f"Try the next search result, or re-search with a different indexer."
@@ -511,7 +515,20 @@ async def torrent_download(
         await asyncio.sleep(interval)
         elapsed += interval
 
-    return f"TIMEOUT after {timeout}s: {name} ({t_hash[:12]})\n{last_status}"
+    # Health check window expired — torrent is alive, report status
+    if ever_had_seeders:
+        return (
+            f"DOWNLOADING: {name} ({t_hash[:12]})\n{last_status}\n"
+            f"The torrent is healthy and downloading. Tell the user it's in progress "
+            f"and they can check status with torrent_info or torrent_list. "
+            f"If they'd prefer a different result, use torrent_delete to remove this one first."
+        )
+    else:
+        return (
+            f"SLOW START: {name} ({t_hash[:12]})\n{last_status}\n"
+            f"No seeders found yet but still searching. Ask the user: wait it out, "
+            f"or try the next search result? Use torrent_delete to remove if switching."
+        )
 
 
 @mcp.tool()
