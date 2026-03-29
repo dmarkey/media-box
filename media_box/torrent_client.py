@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import shutil
+import socket
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -23,6 +24,24 @@ from typing import Any, Optional
 import libtorrent as lt
 
 logger = logging.getLogger("media_box.torrent_client")
+
+
+def _detect_default_route_ip() -> str:
+    """Return the local IP used to reach the internet.
+
+    Opens a UDP socket to 8.8.8.8:80 (no data is sent) and reads the
+    kernel-selected source address via getsockname(). Falls back to
+    "0.0.0.0" on any failure.
+    """
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except Exception:
+        return "0.0.0.0"
 
 
 def _bool(value: str | None, default: bool) -> bool:
@@ -109,8 +128,9 @@ class TorrentClient:
         # - Encryption forced for privacy
         # - Seed to 1.0 ratio then stop (be a good citizen, but don't seed forever)
         listen_port = int(config.TORRENT_PORT or 6881)
+        listen_ip = config.TORRENT_LISTEN_INTERFACE or _detect_default_route_ip()
         settings = {
-            "listen_interfaces": f"0.0.0.0:{listen_port}",
+            "listen_interfaces": f"{listen_ip}:{listen_port}",
             "enable_dht": _bool(config.TORRENT_ENABLE_DHT, True),
             "enable_lsd": _bool(config.TORRENT_ENABLE_LSD, True),
             "enable_natpmp": _bool(config.TORRENT_ENABLE_NATPMP, True),
@@ -165,7 +185,7 @@ class TorrentClient:
         # Restore previous torrents
         self._restore_torrents()
         logger.info(
-            f"Torrent client started (port {listen_port}, "
+            f"Torrent client started ({listen_ip}:{listen_port}, "
             f"{len(self._handles)} resumed torrents)"
         )
 
@@ -478,6 +498,16 @@ class TorrentClient:
                 remaining = status.total_wanted - status.total_wanted_done
                 eta = int(remaining / status.download_rate)
 
+            # Tracker-reported totals (scrape data) — aggregated across all trackers
+            total_seeds_swarm = 0
+            total_peers_swarm = 0
+            for tracker in handle.trackers():
+                # Each tracker endpoint has a list of endpoints with scrape data
+                for ep in getattr(tracker, "endpoints", []):
+                    if hasattr(ep, "scrape_complete"):
+                        total_seeds_swarm = max(total_seeds_swarm, ep.scrape_complete)
+                        total_peers_swarm = max(total_peers_swarm, ep.scrape_incomplete)
+
             results.append({
                 "hash": info_hash,
                 "name": handle.name() or info_hash[:12],
@@ -488,6 +518,8 @@ class TorrentClient:
                 "eta": eta,
                 "num_seeds": status.num_seeds,
                 "num_peers": status.num_peers,
+                "num_seeds_swarm": total_seeds_swarm,
+                "num_peers_swarm": total_peers_swarm,
                 "size": status.total_wanted,
                 "downloaded": status.total_wanted_done,
                 "uploaded": status.total_upload,
@@ -528,6 +560,56 @@ class TorrentClient:
                 "progress": progress,
                 "priority": handle.file_priority(i),
                 "index": i,
+            })
+        return result
+
+    async def get_torrent_peers(self, torrent_hash: str) -> list[dict[str, Any]]:
+        """List connected peers for a torrent."""
+        handle = self._handles.get(torrent_hash)
+        if not handle or not handle.is_valid():
+            return []
+
+        peers = handle.get_peer_info()
+        result = []
+        for p in peers:
+            flags = []
+            if p.flags & lt.peer_info.seed:
+                flags.append("seed")
+            if p.flags & lt.peer_info.connecting:
+                flags.append("connecting")
+            if hasattr(lt.peer_info, "rc4_encrypted") and p.flags & lt.peer_info.rc4_encrypted:
+                flags.append("encrypted")
+            result.append({
+                "ip": p.ip[0] if isinstance(p.ip, tuple) else str(p.ip),
+                "port": p.ip[1] if isinstance(p.ip, tuple) else 0,
+                "client": p.client.decode("utf-8", errors="replace") if isinstance(p.client, bytes) else str(p.client),
+                "progress": p.progress,
+                "down_speed": p.down_speed,
+                "up_speed": p.up_speed,
+                "flags": ",".join(flags),
+            })
+        return result
+
+    async def get_torrent_trackers(self, torrent_hash: str) -> list[dict[str, Any]]:
+        """List trackers for a torrent with scrape data."""
+        handle = self._handles.get(torrent_hash)
+        if not handle or not handle.is_valid():
+            return []
+
+        result = []
+        for t in handle.trackers():
+            seeds = 0
+            peers = 0
+            for ep in getattr(t, "endpoints", []):
+                if hasattr(ep, "scrape_complete"):
+                    seeds = max(seeds, ep.scrape_complete)
+                    peers = max(peers, ep.scrape_incomplete)
+            result.append({
+                "url": t.url,
+                "tier": t.tier,
+                "seeds": seeds,
+                "peers": peers,
+                "message": getattr(t, "message", ""),
             })
         return result
 

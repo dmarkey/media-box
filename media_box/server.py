@@ -550,11 +550,15 @@ async def torrent_list(
 
     rows = []
     for t in torrents:
+        seeds = f"{t.get('num_seeds', 0)}/{t.get('num_seeds_swarm', 0)}"
+        peers = f"{t.get('num_peers', 0)}/{t.get('num_peers_swarm', 0)}"
         rows.append({
             "name": t.get("name", ""),
             "size": format_size(t.get("size")),
             "progress": format_progress(t.get("progress", 0)),
             "state": STATE_MAP.get(t.get("state", ""), t.get("state", "")),
+            "seeds": seeds,
+            "peers": peers,
             "hash": t.get("hash", "")[:12],
         })
     return format_table(rows, [
@@ -562,6 +566,8 @@ async def torrent_list(
         ("Size", "size", 10),
         ("Progress", "progress", 28),
         ("State", "state", 12),
+        ("Seeds", "seeds", 7),
+        ("Peers", "peers", 7),
         ("Hash", "hash", 12),
     ])
 
@@ -592,10 +598,23 @@ async def torrent_info(query: str) -> str:
         f"State:      {state}",
         f"Progress:   {format_progress(progress)}",
         f"Size:       {format_size(torrent.get('size'))}",
-        f"Speed:      {format_size(torrent.get('dlspeed', 0))}/s",
+        f"Speed:      {format_size(torrent.get('dlspeed', 0))}/s ↓  {format_size(torrent.get('upspeed', 0))}/s ↑",
         f"ETA:        {_format_eta(torrent.get('eta', 0))}",
+        f"Seeds:      {torrent.get('num_seeds', 0)} connected, {torrent.get('num_seeds_swarm', 0)} in swarm",
+        f"Peers:      {torrent.get('num_peers', 0)} connected, {torrent.get('num_peers_swarm', 0)} in swarm",
+        f"Ratio:      {torrent.get('ratio', 0):.2f}",
         f"Save path:  {save_path}",
     ]
+
+    # Tracker info
+    trackers = await client.get_torrent_trackers(h)
+    if trackers:
+        lines.append(f"\nTrackers ({len(trackers)}):")
+        for tr in trackers:
+            msg = f"  {tr['url']}  (seeds: {tr['seeds']}, peers: {tr['peers']})"
+            if tr.get("message"):
+                msg += f"  [{tr['message']}]"
+            lines.append(msg)
 
     if files:
         lines.append(f"\nFiles ({len(files)}):")
@@ -604,6 +623,44 @@ async def torrent_info(query: str) -> str:
             lines.append(f"  {pct:5.1f}%  {format_size(f.get('size')):>10s}  {f.get('name', '')}")
 
     return "\n".join(lines)
+
+
+@mcp.tool()
+async def torrent_peers(query: str) -> str:
+    """List connected peers for a torrent — shows IP, client, speed, and flags.
+
+    Args:
+        query: Torrent hash prefix or name substring
+    """
+    client = _torrent_client()
+    torrents = await client.get_torrents()
+    torrent = _find_torrent(torrents, query)
+    if not torrent:
+        return f"No torrent matching '{query}'"
+
+    h = torrent["hash"]
+    peers = await client.get_torrent_peers(h)
+    if not peers:
+        return f"No connected peers for {torrent.get('name', h[:12])}"
+
+    rows = []
+    for p in peers:
+        rows.append({
+            "ip": p["ip"],
+            "client": p.get("client", "")[:20],
+            "progress": format_progress(p.get("progress", 0)),
+            "down": f"{format_size(p.get('down_speed', 0))}/s",
+            "up": f"{format_size(p.get('up_speed', 0))}/s",
+            "flags": p.get("flags", ""),
+        })
+    return format_table(rows, [
+        ("IP", "ip", 15),
+        ("Client", "client", 20),
+        ("Progress", "progress", 28),
+        ("Down", "down", 12),
+        ("Up", "up", 12),
+        ("Flags", "flags", 0),
+    ])
 
 
 @mcp.tool()
