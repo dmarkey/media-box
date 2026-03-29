@@ -39,6 +39,7 @@ STATE_MAP = {
     "uploading": "Seeding",
     "seeding": "Seeding",
     "downloading": "Downloading",
+    "stalledDL": "Stalled",
     "stalled": "Stalled",
     "paused": "Paused",
     "completed": "Completed",
@@ -49,7 +50,12 @@ STATE_MAP = {
     "moving": "Moving",
     "allocating": "Allocating",
     "metadata": "Fetching metadata",
+    "metaDL": "Initializing",
 }
+
+# Torrents added less than this many seconds ago are considered "initializing"
+# rather than "stalled" when they have no seeders yet.
+_INITIALIZING_GRACE_PERIOD = 120
 
 
 def _lt_state_to_str(state: int) -> str:
@@ -446,8 +452,14 @@ class TorrentClient:
                 state_str = "error"
 
             # Friendly state for qbt compat
-            if state_str == "downloading" and status.num_seeds == 0:
-                friendly_state = "stalledDL"
+            added_on = meta.get("added_on", 0)
+            age = time.time() - added_on if added_on else float("inf")
+
+            if state_str == "metadata":
+                friendly_state = "metaDL"
+            elif state_str == "downloading" and status.num_seeds == 0:
+                # Recently-added torrents haven't had time to find peers yet
+                friendly_state = "metaDL" if age < _INITIALIZING_GRACE_PERIOD else "stalledDL"
             elif state_str == "seeding":
                 friendly_state = "uploading"
             elif state_str == "completed":
@@ -458,8 +470,6 @@ class TorrentClient:
                 friendly_state = "downloading"
             elif state_str == "checking":
                 friendly_state = "checkingDL"
-            elif state_str == "metadata":
-                friendly_state = "stalledDL"
             else:
                 friendly_state = state_str
 

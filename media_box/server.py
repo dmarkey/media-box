@@ -451,7 +451,11 @@ async def torrent_download(
     )
 
     if not wait:
-        return f"Added: {title} ({t_hash[:12]})\nUse torrent_wait(\"{t_hash[:12]}\") to monitor."
+        return (
+            f"Added: {title} ({t_hash[:12]})\n"
+            f"Status will show 'Initializing' for up to 2 minutes while connecting to peers — this is normal.\n"
+            f"Use torrent_wait(\"{t_hash[:12]}\") to monitor."
+        )
 
     # Wait for completion
     timeout = min(max(timeout, 60), 1800)

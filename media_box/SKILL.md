@@ -144,6 +144,7 @@ torrent_download(number=3, category="tv", tag="breaking-bad-s03")
 - **Always use `tag`** with a short, unique, lowercase label
 - By default, `torrent_download` waits for the download to complete
 - For large downloads, use `wait=False` and later call `torrent_wait`
+- **After adding a torrent with `wait=False`, it will show state "Initializing" for up to 2 minutes while it connects to peers.** This is normal — do NOT treat it as stalled or broken. Use `torrent_wait` to monitor it.
 
 > **CRITICAL — `torrent_download` and `torrent_wait` are long-running blocking calls (minutes to hours). ALWAYS run them in a subagent or background task, NEVER in the main conversation thread — they will freeze the chat and the user cannot interact until they complete. Do NOT poll in a loop.**
 
