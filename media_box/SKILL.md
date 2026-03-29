@@ -27,9 +27,9 @@ tvmaze_seasons(show_id)                  — list seasons
 tvmaze_lookup(imdb?, tvdb?)              — lookup by external ID
 
 mover_list(path?)                        — list files in the temp download location
-mover_movie(source, dest_name, force?, torrent_hash?)  — move a movie file to the library
-mover_tv(source, dest_name, show, season, force?, torrent_hash?)  — move a single TV episode
-mover_tv_batch(moves, show, season, force?, torrent_hash?)  — move multiple TV episodes in one call
+mover_movie(source, dest_name, force?, torrent_hash?)  — move a movie file to the library (SLOW — run in subagent)
+mover_tv(source, dest_name, show, season, force?, torrent_hash?)  — move a single TV episode (SLOW — run in subagent)
+mover_tv_batch(moves, show, season, force?, torrent_hash?)  — move multiple TV episodes in one call (SLOW — run in subagent)
 ```
 
 ### Torrent search → download flow
@@ -149,6 +149,8 @@ torrent_download(number=3, category="tv", tag="breaking-bad-s03")
 
 ### Step 6 — Move Files to Final Destination
 
+> **CRITICAL — `mover_movie`, `mover_tv`, and `mover_tv_batch` copy large files and can take a long time (minutes for multi-GB files). ALWAYS run them in a subagent or background task, NEVER in the main conversation thread.**
+
 1. **List the downloaded files:**
    ```
    mover_list()
@@ -202,4 +204,6 @@ jellyfin_search(query="Breaking Bad", type="series")
 10. **Only use tools listed above** — do not invent or guess tool names.
 11. **Never use `sleep` or manual loops** — `torrent_download` and `torrent_wait` handle waiting. If it times out, call `torrent_wait` again.
 12. **NEVER call `torrent_download` or `torrent_wait` in the main conversation thread** — these block for minutes to hours. Always use a subagent or background task so the user can keep chatting.
-13. **Maximum 2 searches per request** — if two searches return no usable results, stop and ask the user.
+13. **NEVER call `mover_movie`, `mover_tv`, or `mover_tv_batch` in the main conversation thread** — file copies can take minutes for large files. Always use a subagent or background task.
+14. **Maximum 2 searches per request** — if two searches return no usable results, stop and ask the user.
+15. **Always check Jellyfin BEFORE downloading** — search Jellyfin for the title first. If the movie or episode already exists in the library, do NOT add the torrent. Tell the user it's already there. This avoids wasting bandwidth and disk space on duplicates.

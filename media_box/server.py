@@ -386,6 +386,9 @@ async def torrent_download(
     Resolves the download link, adds to the torrent client, and optionally
     waits for the download to complete.
 
+    IMPORTANT: Before downloading, ALWAYS check Jellyfin first (jellyfin_search)
+    to confirm the movie/episode is not already in the library. Do not download duplicates.
+
     IMPORTANT: This tool blocks until the download completes (can take minutes
     to hours). ALWAYS call this from a subagent/background task, never in the
     main conversation thread — it will freeze the chat.
@@ -997,16 +1000,20 @@ async def mover_list(path: str = "") -> str:
 import shutil
 
 
-def _copy_file(source: Path, dest: Path, *, force: bool = False) -> str:
+async def _copy_file(source: Path, dest: Path, *, force: bool = False) -> str:
     if dest.exists() and not force:
         return f"Error: destination already exists: {dest}\nUse force=true to overwrite."
     dest.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        shutil.copy2(str(source), str(dest))
-    except BaseException:
-        if dest.exists():
-            dest.unlink()
-        raise
+
+    def _do_copy():
+        try:
+            shutil.copy2(str(source), str(dest))
+        except BaseException:
+            if dest.exists():
+                dest.unlink()
+            raise
+
+    await asyncio.get_event_loop().run_in_executor(None, _do_copy)
     return f"Copied: {source}\n    -> {dest}"
 
 
@@ -1030,6 +1037,8 @@ async def mover_movie(
 ) -> str:
     """Move a movie file to the Jellyfin movies library with proper naming.
 
+    WARNING: This copies large files and can take minutes. Run in a subagent, not the main thread.
+
     Creates folder structure: Title (Year)/Title (Year).ext
 
     Args:
@@ -1048,7 +1057,7 @@ async def mover_movie(
     folder_name = Path(dest_name).stem
     dest = Path(movies_dir) / folder_name / dest_name
 
-    result = _copy_file(source_path, dest, force=force)
+    result = await _copy_file(source_path, dest, force=force)
 
     if torrent_hash:
         cleanup_result = await _cleanup_torrent(torrent_hash)
@@ -1067,6 +1076,8 @@ async def mover_tv(
     torrent_hash: str = "",
 ) -> str:
     """Move a TV episode file to the Jellyfin TV library with proper naming.
+
+    WARNING: This copies large files and can take minutes. Run in a subagent, not the main thread.
 
     Creates folder structure: Show Name/Season XX/Show Name - SXXEXX - Title.ext
 
@@ -1088,7 +1099,7 @@ async def mover_tv(
     season_folder = f"Season {season:02d}"
     dest = Path(tv_dir) / show / season_folder / dest_name
 
-    result = _copy_file(source_path, dest, force=force)
+    result = await _copy_file(source_path, dest, force=force)
 
     if torrent_hash:
         cleanup_result = await _cleanup_torrent(torrent_hash)
@@ -1107,6 +1118,7 @@ async def mover_tv_batch(
 ) -> str:
     """Move multiple TV episode files to the Jellyfin TV library in one operation.
 
+    WARNING: This copies large files and can take minutes. Run in a subagent, not the main thread.
     Use this instead of calling mover_tv repeatedly for each episode in a season.
     Creates folder structure: Show Name/Season XX/<dest_name>
 
@@ -1139,7 +1151,7 @@ async def mover_tv_batch(
 
         dest = Path(tv_dir) / show / season_folder / dest_name
         try:
-            result = _copy_file(source_path, dest, force=force)
+            result = await _copy_file(source_path, dest, force=force)
             lines.append(f"#{i + 1}: {result}")
         except Exception as e:
             lines.append(f"#{i + 1}: ERROR — {e}")
