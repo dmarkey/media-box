@@ -14,7 +14,7 @@ jellyfin_episodes(series_id, season?)    — list episodes for a series
 jellyfin_refresh()                       — trigger a library scan
 
 torrent_search(query, category?, limit?, sort?)  — search for torrents (category: "movies", "tv"; sort: "seeders", "size")
-torrent_download(number, wait?, timeout?, category?, tag?)  — download result #N from the last search. Handles everything: resolves link, adds to client, waits for completion.
+torrent_download(number, timeout?, category?, tag?)  — download result #N and wait for completion (BLOCKING — use subagent)
 torrent_list(filter?, category?, state?)  — list active/completed torrents
 torrent_info(query)                      — detailed torrent info (query by name or hash prefix)
 torrent_delete(query, delete_files?)     — delete a torrent (query by name or hash prefix)
@@ -142,11 +142,9 @@ torrent_download(number=3, category="tv", tag="breaking-bad-s03")
 - The `number` is from the search results table
 - Use `category="tv"` for TV shows, `category="movies"` for movies
 - **Always use `tag`** with a short, unique, lowercase label
-- By default, `torrent_download` waits for the download to complete
-- For large downloads, use `wait=False` and later call `torrent_wait`
-- **After adding a torrent with `wait=False`, it will show state "Initializing" for up to 2 minutes while it connects to peers.** This is normal — do NOT treat it as stalled or broken. Use `torrent_wait` to monitor it.
+- `torrent_download` always waits for the download to complete before returning
 
-> **CRITICAL — `torrent_download` and `torrent_wait` are long-running blocking calls (minutes to hours). ALWAYS run them in a subagent or background task, NEVER in the main conversation thread — they will freeze the chat and the user cannot interact until they complete. Do NOT poll in a loop.**
+> **CRITICAL — `torrent_download` and `torrent_wait` are BLOCKING calls that wait for the full download (minutes to hours). You MUST run them in a subagent or background task. NEVER call them in the main conversation thread — doing so freezes the chat completely and the user cannot interact until the download finishes. This is the #1 most important rule. Do NOT poll in a loop either.**
 
 ### Step 6 — Move Files to Final Destination
 
@@ -203,8 +201,8 @@ jellyfin_search(query="Breaking Bad", type="series")
 8. **Keep the user informed** — in manual mode, at every step. In auto mode, provide brief status updates.
 9. **Handle errors gracefully** — if a search returns nothing, tell the user and suggest alternatives.
 10. **Only use tools listed above** — do not invent or guess tool names.
-11. **Never use `sleep` or manual loops** — `torrent_download` and `torrent_wait` handle waiting. If it times out, call `torrent_wait` again.
-12. **NEVER call `torrent_download` or `torrent_wait` in the main conversation thread** — these block for minutes to hours. Always use a subagent or background task so the user can keep chatting.
+11. **Never use `sleep` or manual loops** — `torrent_download` and `torrent_wait` handle waiting internally. If it times out, call `torrent_wait` again.
+12. **NEVER call `torrent_download` or `torrent_wait` in the main conversation thread** — these block for minutes to hours. ALWAYS use a subagent or background task so the user can keep chatting. This is non-negotiable.
 13. **NEVER call `mover_movie`, `mover_tv`, or `mover_tv_batch` in the main conversation thread** — file copies can take minutes for large files. Always use a subagent or background task.
 14. **Maximum 2 searches per request** — if two searches return no usable results, stop and ask the user.
 15. **Always check Jellyfin BEFORE downloading** — search Jellyfin for the title first. If the movie or episode already exists in the library, do NOT add the torrent. Tell the user it's already there. This avoids wasting bandwidth and disk space on duplicates.

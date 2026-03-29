@@ -377,26 +377,25 @@ async def torrent_search(
 @mcp.tool()
 async def torrent_download(
     number: int,
-    wait: bool = True,
     timeout: int = 1800,
     category: str = "",
     tag: str = "",
 ) -> str:
     """Download a torrent from the most recent search results.
-    Resolves the download link, adds to the torrent client, and optionally
-    waits for the download to complete.
+    Resolves the download link, adds to the torrent client, and waits for
+    the download to complete before returning.
 
     IMPORTANT: Before downloading, ALWAYS check Jellyfin first (jellyfin_search)
     to confirm the movie/episode is not already in the library. Do not download duplicates.
 
-    IMPORTANT: This tool blocks until the download completes (can take minutes
-    to hours). ALWAYS call this from a subagent/background task, never in the
-    main conversation thread — it will freeze the chat.
+    WARNING — BLOCKING CALL: This tool waits for the full download to finish,
+    which can take minutes to hours. You MUST call this from a subagent or
+    background task. Calling it in the main conversation thread will freeze
+    the chat and the user cannot interact until it returns.
 
     Args:
         number: Result number from torrent_search (e.g. 1, 2, 3)
-        wait: Wait for download to complete (default True)
-        timeout: Max seconds to wait if wait=True (default 1800)
+        timeout: Max seconds to wait (default 1800, i.e. 30 minutes)
         category: Category tag for organizing (e.g. "tv", "movies")
         tag: Custom tag for tracking this download
     """
@@ -449,13 +448,6 @@ async def torrent_download(
     t_hash = await client.add_torrent(
         source, save_path=save_path, category=category, tag=tag,
     )
-
-    if not wait:
-        return (
-            f"Added: {title} ({t_hash[:12]})\n"
-            f"Status will show 'Initializing' for up to 2 minutes while connecting to peers — this is normal.\n"
-            f"Use torrent_wait(\"{t_hash[:12]}\") to monitor."
-        )
 
     # Wait for completion
     timeout = min(max(timeout, 60), 1800)
