@@ -11,7 +11,7 @@ dependencies = [
     "aiohttp>=3.9",
     "libtorrent>=2.0.11",
     "mcp[cli]>=1.0",
-    "pyackett[cloudflare]>=0.3.0",
+    "pyackett[cloudflare]>=0.3.1",
 ]
 
 [tool.hatch.build.targets.wheel]
