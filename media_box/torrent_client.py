@@ -77,6 +77,26 @@ STATE_MAP = {
 _INITIALIZING_GRACE_PERIOD = 120
 
 
+def _tracker_scrape(tracker: dict) -> tuple[int, int]:
+    """Extract (seeds, peers) scrape counts from a handle.trackers() entry.
+
+    The python bindings return plain dicts. Scrape data appears at the top
+    level and, depending on libtorrent version, on each endpoint either
+    directly or nested under per-protocol info_hashes. -1 means unknown.
+    """
+    candidates_seeds = [tracker.get("scrape_complete")]
+    candidates_peers = [tracker.get("scrape_incomplete")]
+    for ep in tracker.get("endpoints", []):
+        candidates_seeds.append(ep.get("scrape_complete"))
+        candidates_peers.append(ep.get("scrape_incomplete"))
+        for ih in ep.get("info_hashes", []):
+            candidates_seeds.append(ih.get("scrape_complete"))
+            candidates_peers.append(ih.get("scrape_incomplete"))
+    seeds = max((v for v in candidates_seeds if isinstance(v, int)), default=0)
+    peers = max((v for v in candidates_peers if isinstance(v, int)), default=0)
+    return max(seeds, 0), max(peers, 0)
+
+
 def _lt_state_to_str(state: int) -> str:
     """Convert libtorrent torrent_status.state enum to a string."""
     mapping = {
@@ -512,11 +532,9 @@ class TorrentClient:
             total_seeds_swarm = 0
             total_peers_swarm = 0
             for tracker in handle.trackers():
-                # Each tracker endpoint has a list of endpoints with scrape data
-                for ep in getattr(tracker, "endpoints", []):
-                    if hasattr(ep, "scrape_complete"):
-                        total_seeds_swarm = max(total_seeds_swarm, ep.scrape_complete)
-                        total_peers_swarm = max(total_peers_swarm, ep.scrape_incomplete)
+                seeds, peers = _tracker_scrape(tracker)
+                total_seeds_swarm = max(total_seeds_swarm, seeds)
+                total_peers_swarm = max(total_peers_swarm, peers)
 
             results.append({
                 "hash": info_hash,
@@ -608,18 +626,13 @@ class TorrentClient:
 
         result = []
         for t in handle.trackers():
-            seeds = 0
-            peers = 0
-            for ep in getattr(t, "endpoints", []):
-                if hasattr(ep, "scrape_complete"):
-                    seeds = max(seeds, ep.scrape_complete)
-                    peers = max(peers, ep.scrape_incomplete)
+            seeds, peers = _tracker_scrape(t)
             result.append({
-                "url": t.url,
-                "tier": t.tier,
+                "url": t.get("url", ""),
+                "tier": t.get("tier", 0),
                 "seeds": seeds,
                 "peers": peers,
-                "message": getattr(t, "message", ""),
+                "message": t.get("message", ""),
             })
         return result
 
