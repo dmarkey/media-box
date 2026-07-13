@@ -123,9 +123,11 @@ class TorrentClient:
         self._seed_time = int(config.TORRENT_SEED_TIME or 60) * 60  # config is minutes, store as seconds
 
         # Create libtorrent session with sane defaults for a media box:
-        # - Moderate connection limits (not a seedbox)
+        # - Generous connection limits and fast peer ramp-up for quick downloads
+        # - Announce to every tracker in the torrent for a bigger peer pool
         # - Upload capped at 1 MB/s to not saturate upstream
-        # - Encryption forced for privacy
+        # - Encryption forced for privacy (set TORRENT_ENCRYPTION=enabled for
+        #   a larger peer pool at the cost of allowing plaintext peers)
         # - Seed to 1.0 ratio then stop (be a good citizen, but don't seed forever)
         listen_port = int(config.TORRENT_PORT or 6881)
         listen_ip = config.TORRENT_LISTEN_INTERFACE or _detect_default_route_ip()
@@ -137,10 +139,18 @@ class TorrentClient:
             "enable_upnp": _bool(config.TORRENT_ENABLE_UPNP, True),
             "enable_incoming_utp": _bool(config.TORRENT_ENABLE_UTP, True),
             "enable_outgoing_utp": _bool(config.TORRENT_ENABLE_UTP, True),
-            "connections_limit": int(config.TORRENT_MAX_CONNECTIONS or 200),
-            "unchoke_slots_limit": int(config.TORRENT_MAX_UPLOADS or 4),
+            "connections_limit": int(config.TORRENT_MAX_CONNECTIONS or 500),
+            "connection_speed": int(config.TORRENT_CONNECTION_SPEED or 100),
+            "unchoke_slots_limit": int(config.TORRENT_MAX_UPLOADS or 8),
             "download_rate_limit": int(config.TORRENT_DOWNLOAD_RATE_LIMIT or 0),
             "upload_rate_limit": int(config.TORRENT_UPLOAD_RATE_LIMIT or 1024 * 1024),  # 1 MB/s
+            "announce_to_all_trackers": _bool(config.TORRENT_ANNOUNCE_ALL_TRACKERS, True),
+            "announce_to_all_tiers": _bool(config.TORRENT_ANNOUNCE_ALL_TIERS, True),
+            "active_downloads": int(config.TORRENT_ACTIVE_DOWNLOADS or 8),
+            "active_seeds": int(config.TORRENT_ACTIVE_SEEDS or 10),
+            # Deeper request pipelining and send buffer for fast lines
+            "max_out_request_queue": 1500,
+            "send_buffer_watermark": 3 * 1024 * 1024,
             "anonymous_mode": _bool(config.TORRENT_ANONYMOUS_MODE, False),
             "alert_mask": (
                 lt.alert.category_t.status_notification
@@ -174,7 +184,7 @@ class TorrentClient:
         self._session = lt.session(settings)
 
         # Per-torrent defaults
-        self._max_connections_per_torrent = int(config.TORRENT_MAX_CONNECTIONS_PER_TORRENT or 50)
+        self._max_connections_per_torrent = int(config.TORRENT_MAX_CONNECTIONS_PER_TORRENT or 200)
         self._max_uploads_per_torrent = int(config.TORRENT_MAX_UPLOADS_PER_TORRENT or -1)
 
         self._handles: dict[str, lt.torrent_handle] = {}

@@ -12,13 +12,18 @@ jellyfin_search(query, type?)            — search Jellyfin library (type: "mov
 jellyfin_libraries()                     — list media libraries
 jellyfin_episodes(series_id, season?)    — list episodes for a series
 jellyfin_refresh()                       — trigger a library scan
+jellyfin_devices()                       — list devices that accept remote playback control
+jellyfin_play(session_id, item_id)       — start playback on a remote device
+jellyfin_command(session_id, command)    — send a playback command (Pause, Stop, SetVolume, ...)
 
 torrent_search(query, category?, limit?, sort?)  — search for torrents (category: "movies", "tv"; sort: "seeders", "size")
-torrent_download(number, timeout?, category?, tag?)  — download result #N and wait for completion (BLOCKING — use subagent)
+torrent_download(number, timeout?, category?, tag?, search_id?)  — download result #N; health-checks for ~2 min then returns while the download continues
 torrent_list(filter?, category?, state?)  — list active/completed torrents
 torrent_info(query)                      — detailed torrent info (query by name or hash prefix)
+torrent_peers(query)                     — list connected peers for a torrent
 torrent_delete(query, delete_files?)     — delete a torrent (query by name or hash prefix)
-torrent_wait(query, timeout?)            — wait for a torrent to complete
+torrent_wait(query, timeout?)            — wait for a torrent to complete (BLOCKING — use subagent)
+torrent_logs(limit?)                     — recent torrent engine logs (troubleshooting only)
 
 tvmaze_search(query)                     — search for TV shows
 tvmaze_show(show_id)                     — show details
@@ -40,9 +45,14 @@ mover_tv_batch(moves, show, season, force?, torrent_hash?)  — move multiple TV
 torrent_download(number=3, category="tv")
 ```
 
-That's it — the tool resolves the download link, adds it to the torrent client, and waits for completion. It returns the save path when done.
+That's it — the tool resolves the download link, adds it to the torrent client, and monitors it for ~2 minutes. It returns one of:
 
-You **never** need to handle magnet links, hashes, search IDs, or URLs. Just the result number.
+- **Complete** — small/fast torrents may finish within the window; save path included
+- **DOWNLOADING** — healthy and in progress; check back later with `torrent_info` or wait with `torrent_wait`
+- **DEAD TORRENT (removed)** — no seeders; try the next search result
+- **ERROR / SLOW START** — report to the user and decide together
+
+You **never** need to handle magnet links, hashes, or URLs. Just the result number. Each search prints a `search id` — pass it as `search_id` only if you need a result from an *earlier* search; by default the most recent search is used.
 
 ---
 
@@ -142,9 +152,9 @@ torrent_download(number=3, category="tv", tag="breaking-bad-s03")
 - The `number` is from the search results table
 - Use `category="tv"` for TV shows, `category="movies"` for movies
 - **Always use `tag`** with a short, unique, lowercase label
-- `torrent_download` always waits for the download to complete before returning
+- `torrent_download` returns after a ~2 minute health check — the download keeps running in the background. If it reports DOWNLOADING, tell the user it's in progress; use `torrent_wait` (in a subagent) only when you need to block until it finishes before moving files.
 
-> **CRITICAL — `torrent_download` and `torrent_wait` are BLOCKING calls that wait for the full download (minutes to hours). You MUST run them in a subagent or background task. NEVER call them in the main conversation thread — doing so freezes the chat completely and the user cannot interact until the download finishes. This is the #1 most important rule. Do NOT poll in a loop either.**
+> **CRITICAL — `torrent_wait` is a BLOCKING call that waits for the full download (minutes to hours). You MUST run it in a subagent or background task. NEVER call it in the main conversation thread — doing so freezes the chat completely and the user cannot interact until the download finishes. This is the #1 most important rule. Do NOT poll `torrent_info` in a loop either.**
 
 ### Step 6 — Move Files to Final Destination
 
@@ -201,8 +211,8 @@ jellyfin_search(query="Breaking Bad", type="series")
 8. **Keep the user informed** — in manual mode, at every step. In auto mode, provide brief status updates.
 9. **Handle errors gracefully** — if a search returns nothing, tell the user and suggest alternatives.
 10. **Only use tools listed above** — do not invent or guess tool names.
-11. **Never use `sleep` or manual loops** — `torrent_download` and `torrent_wait` handle waiting internally. If it times out, call `torrent_wait` again.
-12. **NEVER call `torrent_download` or `torrent_wait` in the main conversation thread** — these block for minutes to hours. ALWAYS use a subagent or background task so the user can keep chatting. This is non-negotiable.
+11. **Never use `sleep` or manual loops** — `torrent_download` and `torrent_wait` handle waiting internally. If `torrent_wait` times out, call it again.
+12. **NEVER call `torrent_wait` in the main conversation thread** — it blocks for minutes to hours. ALWAYS use a subagent or background task so the user can keep chatting. (`torrent_download` is fine in the main thread — it returns within ~2 minutes.)
 13. **NEVER call `mover_movie`, `mover_tv`, or `mover_tv_batch` in the main conversation thread** — file copies can take minutes for large files. Always use a subagent or background task.
 14. **Maximum 2 searches per request** — if two searches return no usable results, stop and ask the user.
 15. **Always check Jellyfin BEFORE downloading** — search Jellyfin for the title first. If the movie or episode already exists in the library, do NOT add the torrent. Tell the user it's already there. This avoids wasting bandwidth and disk space on duplicates.

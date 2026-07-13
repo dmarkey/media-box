@@ -1,8 +1,10 @@
+import argparse
 import asyncio
 import json
 import os
 import re
 import secrets
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -371,7 +373,10 @@ async def torrent_search(
         ("Indexer", "indexer", 15),
     ])
 
-    return f"{table}\n\n{len(results)} results. Use torrent_download(number) to download."
+    return (
+        f"{table}\n\n{len(results)} results (search id: {search_id}). "
+        f"Use torrent_download(number) to download."
+    )
 
 
 @mcp.tool()
@@ -380,6 +385,7 @@ async def torrent_download(
     timeout: int = 120,
     category: str = "",
     tag: str = "",
+    search_id: str = "",
 ) -> str:
     """Download a torrent from the most recent search results.
     Resolves the download link, adds to the torrent client, and monitors it
@@ -400,8 +406,11 @@ async def torrent_download(
         timeout: Max seconds to wait for health check (default 120, i.e. 2 minutes)
         category: Category tag for organizing (e.g. "tv", "movies")
         tag: Custom tag for tracking this download
+        search_id: Search id from torrent_search output. Omit to use the most
+            recent search — only needed to pick from an older search.
     """
-    if not _last_search_id:
+    sid = search_id or _last_search_id
+    if not sid:
         return "Error: no search results. Run torrent_search first."
 
     idx = number - 1
@@ -409,7 +418,7 @@ async def torrent_download(
         return "Error: number must be >= 1"
 
     try:
-        data = _load_search(_last_search_id)
+        data = _load_search(sid)
     except ValueError as e:
         return str(e)
 
@@ -434,7 +443,7 @@ async def torrent_download(
         if isinstance(resolved, str):
             source = resolved
         else:
-            tmp_path = SEARCH_DIR / f"{_last_search_id}_{idx}.torrent"
+            tmp_path = SEARCH_DIR / f"{sid}_{idx}.torrent"
             tmp_path.write_bytes(resolved)
             source = str(tmp_path)
     else:
@@ -765,8 +774,7 @@ async def torrent_wait(query: str, timeout: int = 1800) -> str:
             return error_msg
 
         if elapsed >= _NO_SEEDERS_TIMEOUT and not ever_had_seeders and progress < 1.0:
-            client = _torrent_client()
-            await client.remove_torrent(t_hash, delete_files=True)
+            await client.delete_torrent(t_hash, delete_files=True)
             return (
                 f"DEAD TORRENT (removed): {name} — no seeders after {_NO_SEEDERS_TIMEOUT}s ({t_hash[:12]}). "
                 f"Try the next search result, or re-search with a different indexer."
@@ -1067,9 +1075,6 @@ async def mover_list(path: str = "") -> str:
     return "\n".join(lines)
 
 
-import shutil
-
-
 async def _copy_file(source: Path, dest: Path, *, force: bool = False) -> str:
     if dest.exists() and not force:
         return f"Error: destination already exists: {dest}\nUse force=true to overwrite."
@@ -1094,7 +1099,7 @@ async def _cleanup_torrent(torrent_hash: str) -> str:
     if not match:
         return f"No torrent matching: {torrent_hash}"
     full_hash = match["hash"]
-    await client.remove_torrent(full_hash, delete_files=True)
+    await client.delete_torrent(full_hash, delete_files=True)
     return f"Deleted torrent {full_hash[:12]} and remaining files"
 
 
@@ -1241,9 +1246,54 @@ async def mover_tv_batch(
 # Entry point
 # ---------------------------------------------------------------------------
 
+_TRANSPORT_ALIASES = {
+    "http": "streamable-http",
+    "streamable-http": "streamable-http",
+    "sse": "sse",
+    "stdio": "stdio",
+}
+
 
 def main():
-    mcp.run()
+    parser = argparse.ArgumentParser(
+        description="media-box MCP server",
+    )
+    parser.add_argument(
+        "--transport",
+        choices=sorted(_TRANSPORT_ALIASES),
+        default=config.get_env("MCP_TRANSPORT") or "http",
+        help="MCP transport: http (streamable HTTP, default), sse, or stdio",
+    )
+    parser.add_argument(
+        "--host",
+        default=config.get_env("MCP_HOST") or "127.0.0.1",
+        help="bind address for http/sse transports (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(config.get_env("MCP_PORT") or 8765),
+        help="port for http/sse transports (default: 8765)",
+    )
+    args = parser.parse_args()
+
+    # The default can come from the config file, which argparse doesn't validate
+    transport = _TRANSPORT_ALIASES.get(args.transport)
+    if transport is None:
+        parser.error(
+            f"invalid transport '{args.transport}' "
+            f"(choose from {', '.join(sorted(_TRANSPORT_ALIASES))})"
+        )
+
+    if transport == "stdio":
+        mcp.run(transport="stdio")
+        return
+
+    mcp.settings.host = args.host
+    mcp.settings.port = args.port
+    path = mcp.settings.streamable_http_path if transport == "streamable-http" else mcp.settings.sse_path
+    print(f"media-box MCP server listening on http://{args.host}:{args.port}{path} ({transport})")
+    mcp.run(transport=transport)
 
 
 if __name__ == "__main__":

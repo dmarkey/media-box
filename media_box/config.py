@@ -103,6 +103,11 @@ def require_env(*names: str) -> list[str]:
     return values
 
 
+# MCP server transport
+MCP_TRANSPORT = get_env("MCP_TRANSPORT")  # http (streamable HTTP, default), sse, or stdio
+MCP_HOST = get_env("MCP_HOST")  # bind address for http/sse (default: 127.0.0.1)
+MCP_PORT = get_env("MCP_PORT")  # port for http/sse (default: 8765)
+
 # Jellyfin
 JELLYFIN_URL = get_env("JELLYFIN_URL")
 JELLYFIN_API_KEY = get_env("JELLYFIN_API_KEY")
@@ -114,10 +119,15 @@ TORRENT_SEARCH_PROXY = get_env("TORRENT_SEARCH_PROXY")  # socks5://user:pass@hos
 
 # Torrent client (libtorrent)
 TORRENT_PORT = get_env("TORRENT_PORT")  # listen port (default: 6881)
-TORRENT_MAX_CONNECTIONS = get_env("TORRENT_MAX_CONNECTIONS")  # global max (default: 200)
-TORRENT_MAX_CONNECTIONS_PER_TORRENT = get_env("TORRENT_MAX_CONNECTIONS_PER_TORRENT")  # per-torrent (default: 50)
-TORRENT_MAX_UPLOADS = get_env("TORRENT_MAX_UPLOADS")  # global upload slots (default: 4)
+TORRENT_MAX_CONNECTIONS = get_env("TORRENT_MAX_CONNECTIONS")  # global max (default: 500)
+TORRENT_MAX_CONNECTIONS_PER_TORRENT = get_env("TORRENT_MAX_CONNECTIONS_PER_TORRENT")  # per-torrent (default: 200)
+TORRENT_CONNECTION_SPEED = get_env("TORRENT_CONNECTION_SPEED")  # peer connection attempts/sec (default: 100)
+TORRENT_MAX_UPLOADS = get_env("TORRENT_MAX_UPLOADS")  # global upload slots (default: 8)
 TORRENT_MAX_UPLOADS_PER_TORRENT = get_env("TORRENT_MAX_UPLOADS_PER_TORRENT")  # per-torrent (default: -1)
+TORRENT_ANNOUNCE_ALL_TRACKERS = get_env("TORRENT_ANNOUNCE_ALL_TRACKERS")  # announce to every tracker, not just the first working one (default: true)
+TORRENT_ANNOUNCE_ALL_TIERS = get_env("TORRENT_ANNOUNCE_ALL_TIERS")  # announce to all tracker tiers (default: true)
+TORRENT_ACTIVE_DOWNLOADS = get_env("TORRENT_ACTIVE_DOWNLOADS")  # simultaneous active downloads before queueing (default: 8)
+TORRENT_ACTIVE_SEEDS = get_env("TORRENT_ACTIVE_SEEDS")  # simultaneous active seeds (default: 10)
 TORRENT_DOWNLOAD_RATE_LIMIT = get_env("TORRENT_DOWNLOAD_RATE_LIMIT")  # bytes/s, 0 = unlimited (default: 0)
 TORRENT_UPLOAD_RATE_LIMIT = get_env("TORRENT_UPLOAD_RATE_LIMIT")  # bytes/s (default: 1048576 = 1MB/s)
 TORRENT_ENABLE_DHT = get_env("TORRENT_ENABLE_DHT")  # true/false (default: true)
@@ -125,7 +135,7 @@ TORRENT_ENABLE_LSD = get_env("TORRENT_ENABLE_LSD")  # true/false (default: true)
 TORRENT_ENABLE_UTP = get_env("TORRENT_ENABLE_UTP")  # true/false (default: true)
 TORRENT_ENABLE_UPNP = get_env("TORRENT_ENABLE_UPNP")  # true/false (default: true)
 TORRENT_ENABLE_NATPMP = get_env("TORRENT_ENABLE_NATPMP")  # true/false (default: true)
-TORRENT_ENCRYPTION = get_env("TORRENT_ENCRYPTION")  # forced/enabled/disabled (default: forced)
+TORRENT_ENCRYPTION = get_env("TORRENT_ENCRYPTION")  # forced/enabled/disabled (default: forced; "enabled" sees more peers = faster)
 TORRENT_SEED_RATIO = get_env("TORRENT_SEED_RATIO")  # stop seeding at ratio (default: 1.0)
 TORRENT_SEED_TIME = get_env("TORRENT_SEED_TIME")  # stop seeding after minutes (default: 60)
 TORRENT_ANONYMOUS_MODE = get_env("TORRENT_ANONYMOUS_MODE")  # true/false (default: false)

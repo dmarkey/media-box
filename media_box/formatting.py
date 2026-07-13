@@ -68,37 +68,3 @@ def format_table(rows: list[dict], columns: list[tuple[str, str, int]]) -> str:
         lines.append("  ".join(parts))
 
     return "\n".join(lines)
-
-
-def print_table(rows: list[dict], columns: list[tuple[str, str, int]]) -> None:
-    """Print a formatted table.
-
-    columns: list of (header, dict_key, width).  A width of 0 means auto-size
-    from the data (no truncation).
-    """
-    if not rows:
-        print("  (no results)")
-        return
-
-    # Resolve auto-width (0) columns from data
-    widths = []
-    for header, key, width in columns:
-        if width == 0:
-            width = max(len(header), max(len(str(row.get(key, ""))) for row in rows))
-        widths.append(width)
-
-    # Header
-    header_parts = []
-    for (header, _, _), w in zip(columns, widths):
-        header_parts.append(header.ljust(w))
-    header_line = "  ".join(header_parts)
-    print(header_line)
-    print("─" * len(header_line))
-
-    # Rows
-    for row in rows:
-        parts = []
-        for (_, key, _), w in zip(columns, widths):
-            val = str(row.get(key, ""))
-            parts.append(truncate(val, w).ljust(w))
-        print("  ".join(parts))
