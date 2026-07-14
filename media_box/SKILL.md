@@ -17,7 +17,7 @@ jellyfin_play(session_id, item_id)       — start playback on a remote device
 jellyfin_command(session_id, command)    — send a playback command (Pause, Stop, SetVolume, ...)
 
 torrent_search(query, category?, limit?, sort?)  — search for torrents (category: "movies", "tv"; sort: "seeders", "size")
-torrent_download(number, timeout?, category?, tag?, search_id?)  — download result #N; health-checks for ~2 min then returns while the download continues
+torrent_download(number, timeout?, category?, tag?, search_id?)  — download result #N; returns as soon as health is proven (usually 10-20s, up to ~2 min for slow starters) while the download continues
 torrent_list(filter?, category?, state?)  — list active/completed torrents
 torrent_info(query)                      — detailed torrent info (query by name or hash prefix)
 torrent_peers(query)                     — list connected peers for a torrent
@@ -45,10 +45,10 @@ mover_tv_batch(moves, show, season, force?, torrent_hash?)  — move multiple TV
 torrent_download(number=3, category="tv")
 ```
 
-That's it — the tool resolves the download link, adds it to the torrent client, and monitors it for ~2 minutes. It returns one of:
+That's it — the tool resolves the download link, adds it to the torrent client, and monitors it just long enough to prove health (usually 10-20 seconds; up to ~2 minutes for slow starters). It returns one of:
 
+- **DOWNLOADING** — seeders connected and progress advancing; check back later with `torrent_info` or wait with `torrent_wait`
 - **Complete** — small/fast torrents may finish within the window; save path included
-- **DOWNLOADING** — healthy and in progress; check back later with `torrent_info` or wait with `torrent_wait`
 - **DEAD TORRENT (removed)** — no seeders; try the next search result
 - **ERROR / SLOW START** — report to the user and decide together
 
@@ -152,7 +152,7 @@ torrent_download(number=3, category="tv", tag="breaking-bad-s03")
 - The `number` is from the search results table
 - Use `category="tv"` for TV shows, `category="movies"` for movies
 - **Always use `tag`** with a short, unique, lowercase label
-- `torrent_download` returns after a ~2 minute health check — the download keeps running in the background. If it reports DOWNLOADING, tell the user it's in progress; use `torrent_wait` (in a subagent) only when you need to block until it finishes before moving files.
+- `torrent_download` returns as soon as the torrent proves healthy (usually 10-20 seconds) — the download keeps running in the background. If it reports DOWNLOADING, tell the user it's in progress; use `torrent_wait` (in a subagent) only when you need to block until it finishes before moving files.
 
 > **CRITICAL — `torrent_wait` is a BLOCKING call that waits for the full download (minutes to hours). You MUST run it in a subagent or background task. NEVER call it in the main conversation thread — doing so freezes the chat completely and the user cannot interact until the download finishes. This is the #1 most important rule. Do NOT poll `torrent_info` in a loop either.**
 
@@ -212,7 +212,7 @@ jellyfin_search(query="Breaking Bad", type="series")
 9. **Handle errors gracefully** — if a search returns nothing, tell the user and suggest alternatives.
 10. **Only use tools listed above** — do not invent or guess tool names.
 11. **Never use `sleep` or manual loops** — `torrent_download` and `torrent_wait` handle waiting internally. If `torrent_wait` times out, call it again.
-12. **NEVER call `torrent_wait` in the main conversation thread** — it blocks for minutes to hours. ALWAYS use a subagent or background task so the user can keep chatting. (`torrent_download` is fine in the main thread — it returns within ~2 minutes.)
+12. **NEVER call `torrent_wait` in the main conversation thread** — it blocks for minutes to hours. ALWAYS use a subagent or background task so the user can keep chatting. (`torrent_download` is fine in the main thread — it usually returns in seconds, ~2 minutes worst case.)
 13. **NEVER call `mover_movie`, `mover_tv`, or `mover_tv_batch` in the main conversation thread** — file copies can take minutes for large files. Always use a subagent or background task.
 14. **Maximum 2 searches per request** — if two searches return no usable results, stop and ask the user.
 15. **Always check Jellyfin BEFORE downloading** — search Jellyfin for the title first. If the movie or episode already exists in the library, do NOT add the torrent. Tell the user it's already there. This avoids wasting bandwidth and disk space on duplicates.

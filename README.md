@@ -191,7 +191,7 @@ Point any client that supports streamable HTTP at `http://<host>:8765/mcp`. Clie
 
 ## Important: MCP timeout configuration
 
-The `torrent_wait` tool blocks until a torrent finishes downloading, which can take up to 30 minutes (`torrent_download` itself returns within ~2 minutes after a health check). Most MCP clients have a default tool call timeout that is much shorter and will kill the request before the download completes.
+The `torrent_wait` tool blocks until a torrent finishes downloading, which can take up to 30 minutes (`torrent_download` itself returns as soon as the torrent proves healthy — usually seconds, ~2 minutes worst case). Most MCP clients have a default tool call timeout that is much shorter and will kill the request before the download completes.
 
 **If you use `torrent_wait`, increase your MCP client's tool timeout** to at least 1800 seconds (30 minutes) — e.g. `"timeout": 1800` in the Claude Code server config shown above. For other clients, consult their documentation for per-server or global tool call timeouts.
 
@@ -214,7 +214,7 @@ The `torrent_wait` tool blocks until a torrent finishes downloading, which can t
 | Tool | Description |
 |------|-------------|
 | `torrent_search` | Search for torrents across configured indexers. Returns a numbered list. |
-| `torrent_download` | Download result #N from a search. Resolves the link, adds it to the client, and health-checks for ~2 minutes — dead torrents (no seeders) are auto-removed. |
+| `torrent_download` | Download result #N from a search. Resolves the link, adds it to the client, and returns as soon as the torrent proves healthy (usually 10-20s) — dead torrents (no seeders) are auto-removed. |
 | `torrent_list` | List active/completed torrents with filters for name, category, state |
 | `torrent_info` | Detailed torrent info — progress, speed, ETA, trackers, save path, file list |
 | `torrent_peers` | List connected peers for a torrent |

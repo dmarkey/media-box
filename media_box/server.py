@@ -394,12 +394,14 @@ async def torrent_download(
 ) -> str:
     """Download a torrent from the most recent search results.
     Resolves the download link, adds to the torrent client, and monitors it
-    for up to ~2 minutes to check it's healthy (has seeders, is progressing).
+    until its health is known — typically 10-20 seconds, up to ~2 minutes
+    for slow starters.
 
-    Returns once the torrent is either:
+    Returns as soon as the torrent is either:
+    - Healthy and downloading (seeders connected, progress advancing) —
+      tell the user it's downloading and they can check back later with
+      torrent_list / torrent_info
     - Complete (small/fast torrents may finish within the window)
-    - Healthy and downloading — tell the user it's downloading and they can
-      check back later with torrent_list / torrent_info
     - Dead (no seeders found) — auto-removed, suggest trying the next result
     - Errored — report the error
 
@@ -467,11 +469,12 @@ async def torrent_download(
 
     # Monitor torrent health — wait up to timeout to see if it's viable
     timeout = min(max(timeout, 30), 300)
-    interval = 10
+    interval = 5
     elapsed = 0
     name = title
     ever_had_seeders = False
     last_status = ""
+    prev_progress = -1.0
 
     while elapsed < timeout:
         torrents = await client.get_torrents()
@@ -518,6 +521,19 @@ async def torrent_download(
             error_msg += "\nCheck save_path is writable and has enough disk space. Use torrent_logs() for more detail."
             return error_msg
 
+        # Seeders connected and progress advanced between two polls — it's
+        # demonstrably healthy, so return now instead of making the caller
+        # sit out the rest of the window.
+        if num_seeds > 0 and 0 <= prev_progress < progress:
+            return (
+                f"DOWNLOADING: {name} ({t_hash[:12]})\n{last_status}\n"
+                f"Healthy — {num_seeds} seeder(s) connected and progress advancing. "
+                f"The download continues in the background. Tell the user it's in "
+                f"progress; check later with torrent_info or torrent_list. If they'd "
+                f"prefer a different result, use torrent_delete to remove this one first."
+            )
+        prev_progress = progress
+
         # No seeders after the stall timeout — dead torrent, remove it
         if elapsed >= _NO_SEEDERS_TIMEOUT and not ever_had_seeders and progress < 1.0:
             await client.delete_torrent(t_hash, delete_files=True)
@@ -529,7 +545,7 @@ async def torrent_download(
         await asyncio.sleep(interval)
         elapsed += interval
 
-    # Health check window expired — torrent is alive, report status
+    # Health check window expired — torrent is alive but never proved itself
     if ever_had_seeders:
         return (
             f"DOWNLOADING: {name} ({t_hash[:12]})\n{last_status}\n"
