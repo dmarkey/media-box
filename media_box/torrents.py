@@ -14,11 +14,15 @@ SEARCH_DIR = Path(tempfile.gettempdir()) / "media-box" / "searches"
 # ---------------------------------------------------------------------------
 
 _pyackett_instance = None
+# The indexer IDs from TORRENT_INDEXERS this run. Searches are scoped to these
+# so stale configs persisted from previous runs (pyackett saves configured
+# indexers to disk and re-loads them as "configured") don't leak into results.
+_indexer_ids: list[str] = []
 
 
 async def _get_pyackett():
     """Get or create the singleton Pyackett instance."""
-    global _pyackett_instance
+    global _pyackett_instance, _indexer_ids
     if _pyackett_instance is not None:
         return _pyackett_instance
 
@@ -30,6 +34,7 @@ async def _get_pyackett():
         )
 
     indexers = [s.strip() for s in indexers_str.split(",") if s.strip()]
+    _indexer_ids = indexers
 
     from pyackett import Pyackett
 
@@ -60,7 +65,7 @@ async def search(
         limit=limit or 100,
     )
 
-    results = await pk.manager.search(tq)
+    results = await pk.manager.search(tq, indexer_ids=_indexer_ids or None)
 
     return [
         {
