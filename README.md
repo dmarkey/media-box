@@ -51,6 +51,7 @@ MOVIES_SAVE_LOCATION=/path/to/jellyfin/movies
 #MCP_TRANSPORT=http        # http (streamable HTTP, default), sse, or stdio
 #MCP_HOST=127.0.0.1
 #MCP_PORT=8765
+#MCP_STATELESS=true        # stateless HTTP (default) — clients survive server restarts
 ```
 
 Alternatively, set these as environment variables. The server checks the config file first, then falls back to env vars.
@@ -143,6 +144,8 @@ uvx --from git+https://github.com/dmarkey/media-box.git media-box-mcp
 The server starts on `http://127.0.0.1:8765/mcp` using the MCP streamable HTTP transport. Because the torrent client is embedded, run it as a long-lived service — downloads and seeding continue between agent sessions.
 
 Options: `--transport http|sse|stdio`, `--host`, `--port` (or the `MCP_TRANSPORT` / `MCP_HOST` / `MCP_PORT` config keys). The legacy SSE transport is served at `/sse`.
+
+The HTTP transport runs stateless by default, so you can restart or redeploy the server without breaking connected agents — no stale-session 404s. Set `MCP_STATELESS=false` to restore server-side sessions.
 
 <details>
 <summary>Example systemd unit</summary>

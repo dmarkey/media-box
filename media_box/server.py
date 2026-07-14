@@ -1291,6 +1291,13 @@ def main():
 
     mcp.settings.host = args.host
     mcp.settings.port = args.port
+    if transport == "streamable-http":
+        # Stateless by default: with server-side sessions, a server restart
+        # invalidates every connected client's mcp-session-id and their next
+        # request 404s until they re-initialize. Stateless requests are
+        # self-contained, so agents keep working across restarts. media-box
+        # never pushes session-scoped notifications, so nothing is lost.
+        mcp.settings.stateless_http = (config.MCP_STATELESS or "true").lower() in ("true", "1", "yes", "on")
     path = mcp.settings.streamable_http_path if transport == "streamable-http" else mcp.settings.sse_path
     print(f"media-box MCP server listening on http://{args.host}:{args.port}{path} ({transport})")
     mcp.run(transport=transport)
