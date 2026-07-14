@@ -728,3 +728,9 @@ def get_client(
             default_save_path=default_save_path,
         )
     return _instance
+
+
+def shutdown() -> None:
+    """Persist torrent state at process shutdown, if a client was started."""
+    if _instance is not None:
+        _instance.save_state()
