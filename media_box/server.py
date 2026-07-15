@@ -56,32 +56,49 @@ _torrent_client()
 # ---------------------------------------------------------------------------
 # Server-push events
 #
-# Clients opt in by calling `subscribe_events`; completion events are then
-# broadcast to their sessions as MCP log notifications (logger="events") over
-# the standalone GET stream. Requires stateful sessions (MCP_STATELESS=false)
-# — in stateless mode a session doesn't outlive its request, so there is
-# nothing to deliver on.
+# Completion events are ROUTED, not broadcast: a client only receives events
+# for torrents it registered interest in — automatically when it adds one via
+# torrent_download, or explicitly via torrent_watch. Interest is keyed by
+# client identity (clientInfo.name from the MCP handshake), so it survives
+# reconnects: delivery goes to that client's most recently subscribed session
+# (subscribe_events), falling back to the session that registered interest.
+# Interest is consumed when the event fires (completion is terminal), which
+# also dedupes recheck/restart re-fires. Requires stateful sessions
+# (MCP_STATELESS=false) — stateless sessions don't outlive a request.
 # ---------------------------------------------------------------------------
 
-_event_sessions: set = set()
-_announced_hashes: set = set()  # dedupe: recheck/restart can re-fire the alert
+_subscriber_sessions: dict = {}  # client name -> latest subscribed session
+_torrent_interest: dict = {}     # torrent hash -> {client name: session at registration}
 
 
-async def _broadcast_event(data: dict) -> None:
-    for session in list(_event_sessions):
+def _client_name(ctx: Context) -> str:
+    try:
+        return ctx.session.client_params.clientInfo.name or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _register_interest(ctx: Context, t_hash: str) -> None:
+    if ctx is not None:
+        _torrent_interest.setdefault(t_hash.lower(), {})[_client_name(ctx)] = ctx.session
+
+
+async def _deliver_event(data: dict, interested: dict) -> None:
+    for client, fallback_session in interested.items():
+        session = _subscriber_sessions.get(client, fallback_session)
         try:
             await session.send_log_message(level="notice", data=data, logger="events")
         except Exception:
-            _event_sessions.discard(session)  # dead client — drop its session
+            pass  # client gone; interest was already consumed
 
 
 def _on_torrent_finished(data: dict) -> None:
     # called from the alert pump (already on the event loop); never block it
-    if not _event_sessions or data.get("hash") in _announced_hashes:
-        return
-    _announced_hashes.add(data.get("hash"))
+    interested = _torrent_interest.pop(str(data.get("hash", "")).lower(), None)
+    if not interested:
+        return  # nobody asked about this torrent
     try:
-        asyncio.get_running_loop().create_task(_broadcast_event(data))
+        asyncio.get_running_loop().create_task(_deliver_event(data, interested))
     except RuntimeError:
         pass  # no loop (e.g. during shutdown) — nothing to deliver to anyway
 
@@ -91,19 +108,22 @@ _torrent_client().on_torrent_finished = _on_torrent_finished
 
 @mcp.tool()
 async def subscribe_events(ctx: Context) -> str:
-    """Subscribe this client session to server events (e.g. torrent completion).
+    """Register this session as your delivery channel for server events.
 
-    Events arrive as MCP log notifications with logger="events" and a JSON
+    Events are per-torrent and routed: you receive a completion event only for
+    torrents you added (torrent_download) or asked to watch (torrent_watch).
+    They arrive as MCP log notifications with logger="events" and a JSON
     payload like {"event": "torrent_finished", "name", "hash", "save_path"}.
-    Subscriptions are per-session: re-call this after reconnecting; calling it
-    twice on one session is harmless.
+    Call this after connecting (and again after reconnecting); repeat calls
+    are harmless.
     """
     if mcp.settings.stateless_http:
         return ("Cannot subscribe: the server is running stateless "
                 "(MCP_STATELESS=true), so sessions don't outlive a request and "
                 "events can't be delivered. Set MCP_STATELESS=false and restart.")
-    _event_sessions.add(ctx.session)
-    return "Subscribed to events on this session."
+    _subscriber_sessions[_client_name(ctx)] = ctx.session
+    return ("Subscribed: completion events for torrents you add or watch will "
+            "be delivered to this session.")
 
 
 # ---------------------------------------------------------------------------
@@ -443,6 +463,7 @@ async def torrent_download(
     category: str = "",
     tag: str = "",
     search_id: str = "",
+    ctx: Context = None,
 ) -> str:
     """Download a torrent from the most recent search results.
     Resolves the download link, adds to the torrent client, and monitors it
@@ -518,6 +539,9 @@ async def torrent_download(
     t_hash = await client.add_torrent(
         source, save_path=save_path, category=category, tag=tag,
     )
+    # the caller added it, so they're interested: route the completion event
+    # to them (delivered if they subscribe_events; silently dropped otherwise)
+    _register_interest(ctx, t_hash)
 
     # Monitor torrent health — wait up to timeout to see if it's viable
     timeout = min(max(timeout, 30), 300)
@@ -857,6 +881,30 @@ async def torrent_wait(query: str, timeout: int = 1800) -> str:
         elapsed += interval
 
     return f"TIMEOUT after {timeout}s: {name} ({t_hash[:12]})\n{last_status}"
+
+
+@mcp.tool()
+async def torrent_watch(query: str, ctx: Context = None) -> str:
+    """Get a completion event when an existing torrent finishes downloading.
+
+    Torrents you add via torrent_download are watched automatically — use this
+    for one that is already downloading (see torrent_list). The event is
+    delivered to your subscribed session (see subscribe_events); unlike
+    torrent_wait, this returns immediately instead of blocking.
+
+    Args:
+        query: Torrent hash prefix or name substring
+    """
+    client = _torrent_client()
+    torrents = await client.get_torrents()
+    torrent = _find_torrent(torrents, query)
+    if not torrent:
+        return f"No torrent matching '{query}'"
+    name = torrent.get("name", torrent["hash"][:12])
+    if torrent.get("state") in _DONE_STATES:
+        return f"Already complete: {name} — no event will fire."
+    _register_interest(ctx, torrent["hash"])
+    return f"Watching {name} — a completion event will be delivered when it finishes."
 
 
 @mcp.tool()

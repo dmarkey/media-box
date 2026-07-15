@@ -23,6 +23,8 @@ torrent_info(query)                      — detailed torrent info (query by nam
 torrent_peers(query)                     — list connected peers for a torrent
 torrent_delete(query, delete_files?)     — delete a torrent (query by name or hash prefix)
 torrent_wait(query, timeout?)            — wait for a torrent to complete (BLOCKING — use subagent)
+torrent_watch(query)                     — get a completion EVENT for an existing torrent (non-blocking)
+subscribe_events()                       — register this session to receive completion events
 torrent_logs(limit?)                     — recent torrent engine logs (troubleshooting only)
 
 tvmaze_search(query)                     — search for TV shows
@@ -152,7 +154,8 @@ torrent_download(number=3, category="tv", tag="breaking-bad-s03")
 - The `number` is from the search results table
 - Use `category="tv"` for TV shows, `category="movies"` for movies
 - **Always use `tag`** with a short, unique, lowercase label
-- `torrent_download` returns as soon as the torrent proves healthy (usually 10-20 seconds) — the download keeps running in the background. If it reports DOWNLOADING, tell the user it's in progress; use `torrent_wait` (in a subagent) only when you need to block until it finishes before moving files.
+- `torrent_download` returns as soon as the torrent proves healthy (usually 10-20 seconds) — the download keeps running in the background. If it reports DOWNLOADING, tell the user it's in progress.
+- **Completion events**: if your client is subscribed to events (`subscribe_events`), every torrent you add notifies you automatically when it finishes — you do NOT need `torrent_wait` just to learn about completion, and you are only notified about torrents you added or watch (`torrent_watch`), never anyone else's. Use `torrent_wait` (in a subagent) only when you must block until completion before a next step (e.g. moving files immediately).
 
 > **CRITICAL — `torrent_wait` is a BLOCKING call that waits for the full download (minutes to hours). You MUST run it in a subagent or background task. NEVER call it in the main conversation thread — doing so freezes the chat completely and the user cannot interact until the download finishes. This is the #1 most important rule. Do NOT poll `torrent_info` in a loop either.**
 
