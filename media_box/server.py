@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 from . import config
 from .formatting import (
@@ -52,6 +52,58 @@ def _torrent_client() -> TorrentClient:
 # Start the torrent client eagerly so libtorrent begins listening immediately.
 _torrent_client()
 
+
+# ---------------------------------------------------------------------------
+# Server-push events
+#
+# Clients opt in by calling `subscribe_events`; completion events are then
+# broadcast to their sessions as MCP log notifications (logger="events") over
+# the standalone GET stream. Requires stateful sessions (MCP_STATELESS=false)
+# — in stateless mode a session doesn't outlive its request, so there is
+# nothing to deliver on.
+# ---------------------------------------------------------------------------
+
+_event_sessions: set = set()
+_announced_hashes: set = set()  # dedupe: recheck/restart can re-fire the alert
+
+
+async def _broadcast_event(data: dict) -> None:
+    for session in list(_event_sessions):
+        try:
+            await session.send_log_message(level="notice", data=data, logger="events")
+        except Exception:
+            _event_sessions.discard(session)  # dead client — drop its session
+
+
+def _on_torrent_finished(data: dict) -> None:
+    # called from the alert pump (already on the event loop); never block it
+    if not _event_sessions or data.get("hash") in _announced_hashes:
+        return
+    _announced_hashes.add(data.get("hash"))
+    try:
+        asyncio.get_running_loop().create_task(_broadcast_event(data))
+    except RuntimeError:
+        pass  # no loop (e.g. during shutdown) — nothing to deliver to anyway
+
+
+_torrent_client().on_torrent_finished = _on_torrent_finished
+
+
+@mcp.tool()
+async def subscribe_events(ctx: Context) -> str:
+    """Subscribe this client session to server events (e.g. torrent completion).
+
+    Events arrive as MCP log notifications with logger="events" and a JSON
+    payload like {"event": "torrent_finished", "name", "hash", "save_path"}.
+    Subscriptions are per-session: re-call this after reconnecting; calling it
+    twice on one session is harmless.
+    """
+    if mcp.settings.stateless_http:
+        return ("Cannot subscribe: the server is running stateless "
+                "(MCP_STATELESS=true), so sessions don't outlive a request and "
+                "events can't be delivered. Set MCP_STATELESS=false and restart.")
+    _event_sessions.add(ctx.session)
+    return "Subscribed to events on this session."
 
 
 # ---------------------------------------------------------------------------
@@ -1313,8 +1365,10 @@ def main():
             # Stateless by default: with server-side sessions, a server restart
             # invalidates every connected client's mcp-session-id and their next
             # request 404s until they re-initialize. Stateless requests are
-            # self-contained, so agents keep working across restarts. media-box
-            # never pushes session-scoped notifications, so nothing is lost.
+            # self-contained, so agents keep working across restarts. BUT
+            # server-push events (subscribe_events) need sessions that outlive
+            # a request — set MCP_STATELESS=false to enable them; clients then
+            # must re-initialize (and re-subscribe) after a server restart.
             mcp.settings.stateless_http = (config.MCP_STATELESS or "true").lower() in ("true", "1", "yes", "on")
         path = mcp.settings.streamable_http_path if transport == "streamable-http" else mcp.settings.sse_path
         print(f"media-box MCP server listening on http://{args.host}:{args.port}{path} ({transport})")

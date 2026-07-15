@@ -107,7 +107,7 @@ def require_env(*names: str) -> list[str]:
 MCP_TRANSPORT = get_env("MCP_TRANSPORT")  # http (streamable HTTP, default), sse, or stdio
 MCP_HOST = get_env("MCP_HOST")  # bind address for http/sse (default: 127.0.0.1)
 MCP_PORT = get_env("MCP_PORT")  # port for http/sse (default: 8765)
-MCP_STATELESS = get_env("MCP_STATELESS")  # true/false (default: true) — stateless HTTP lets clients survive server restarts
+MCP_STATELESS = get_env("MCP_STATELESS")  # true/false (default: true) — stateless HTTP lets clients survive server restarts; set false to enable server-push events (subscribe_events)
 
 # Jellyfin
 JELLYFIN_URL = get_env("JELLYFIN_URL")

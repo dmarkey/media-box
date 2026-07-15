@@ -212,6 +212,11 @@ class TorrentClient:
         # Ring buffer for libtorrent alerts (kept for diagnostic tool)
         self._alert_log: collections.deque[str] = collections.deque(maxlen=500)
 
+        # Optional hook fired (on the event loop) when a torrent completes.
+        # Receives a dict: {"event", "name", "hash", "save_path"}. Errors are
+        # swallowed — alert processing must never die to a listener.
+        self.on_torrent_finished = None
+
         # Restore previous torrents
         self._restore_torrents()
         logger.info(
@@ -299,6 +304,18 @@ class TorrentClient:
                 resume_path.write_bytes(resume_data)
             elif isinstance(alert, lt.save_resume_data_failed_alert):
                 pass  # torrent was removed or has no metadata yet
+            elif isinstance(alert, lt.torrent_finished_alert):
+                if self.on_torrent_finished is not None:
+                    try:
+                        status = alert.handle.status()
+                        self.on_torrent_finished({
+                            "event": "torrent_finished",
+                            "name": status.name or str(alert.handle.info_hash())[:12],
+                            "hash": str(alert.handle.info_hash()),
+                            "save_path": status.save_path,
+                        })
+                    except Exception:
+                        logger.exception("on_torrent_finished hook failed")
 
     def get_logs(self, limit: int = 100) -> list[str]:
         """Return the most recent libtorrent alert log entries."""
