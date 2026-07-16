@@ -212,10 +212,15 @@ class TorrentClient:
         # Ring buffer for libtorrent alerts (kept for diagnostic tool)
         self._alert_log: collections.deque[str] = collections.deque(maxlen=500)
 
-        # Optional hook fired (on the event loop) when a torrent completes.
-        # Receives a dict: {"event", "name", "hash", "save_path"}. Errors are
-        # swallowed — alert processing must never die to a listener.
-        self.on_torrent_finished = None
+        # Optional hook fired (on the event loop) on a torrent lifecycle event:
+        # on_torrent_event(event_type, data). event_type is one of
+        # "torrent_finished" (from the completion alert), "torrent_healthy"
+        # (started making real progress), "torrent_stalled" (progress dried
+        # up). data carries {"event", "name", "hash", "progress", ...}. Errors
+        # are swallowed — alert/status processing must never die to a listener.
+        self.on_torrent_event = None
+        # per-torrent health state for the healthy/stalled transition detector
+        self._health: dict[str, dict] = {}
 
         # Restore previous torrents
         self._restore_torrents()
@@ -305,17 +310,72 @@ class TorrentClient:
             elif isinstance(alert, lt.save_resume_data_failed_alert):
                 pass  # torrent was removed or has no metadata yet
             elif isinstance(alert, lt.torrent_finished_alert):
-                if self.on_torrent_finished is not None:
-                    try:
-                        status = alert.handle.status()
-                        self.on_torrent_finished({
-                            "event": "torrent_finished",
-                            "name": status.name or str(alert.handle.info_hash())[:12],
-                            "hash": str(alert.handle.info_hash()),
-                            "save_path": status.save_path,
-                        })
-                    except Exception:
-                        logger.exception("on_torrent_finished hook failed")
+                try:
+                    status = alert.handle.status()
+                    h = str(alert.handle.info_hash())
+                    self._health.pop(h, None)  # terminal: stop tracking health
+                    self._emit_event("torrent_finished", {
+                        "name": status.name or h[:12],
+                        "hash": h,
+                        "save_path": status.save_path,
+                    })
+                except Exception:
+                    logger.exception("torrent_finished emit failed")
+
+    def _emit_event(self, event_type: str, data: dict) -> None:
+        if self.on_torrent_event is None:
+            return
+        try:
+            self.on_torrent_event(event_type, {"event": event_type, **data})
+        except Exception:
+            logger.exception("on_torrent_event hook failed (%s)", event_type)
+
+    # progress must stall for this many status cycles (~30s each) before a
+    # torrent_stalled event fires — one flat spot shouldn't cry wolf
+    _STALL_CYCLES = 3
+
+    def _check_health(self, torrents: list[dict]) -> None:
+        """Detect healthy/stalled transitions from a status snapshot.
+
+        Fired once per status cycle. healthy = downloading with seeders and a
+        non-zero rate; stalled = neither, for _STALL_CYCLES consecutive cycles
+        while still incomplete. Each fires once per transition, so a torrent
+        that recovers from a stall re-announces healthy.
+        """
+        if self.on_torrent_event is None:
+            return
+        # states that aren't an in-flight download: nothing to judge
+        idle = {"uploading", "stalledUP", "pausedUP", "completed", "paused",
+                "seeding", "error"}
+        live = set()
+        for t in torrents:
+            h = t.get("hash")
+            if not h:
+                continue
+            live.add(h)
+            if t.get("state") in idle:
+                self._health.pop(h, None)
+                continue
+            st = self._health.setdefault(h, {"stall": 0, "healthy": False,
+                                             "stalled": False})
+            moving = t.get("dlspeed", 0) > 0 and t.get("num_seeds", 0) > 0
+            payload = {"name": t.get("name"), "hash": h,
+                       "progress": round(t.get("progress", 0.0), 4),
+                       "dlspeed": t.get("dlspeed", 0),
+                       "num_seeds": t.get("num_seeds", 0)}
+            if moving:
+                st["stall"] = 0
+                if not st["healthy"]:                       # first time or recovered
+                    self._emit_event("torrent_healthy", payload)
+                    st["healthy"], st["stalled"] = True, False
+            else:
+                st["stall"] += 1
+                if st["stall"] >= self._STALL_CYCLES and not st["stalled"]:
+                    self._emit_event("torrent_stalled", payload)
+                    st["stalled"], st["healthy"] = True, False
+        for h in list(self._health):                        # prune removed torrents
+            if h not in live:
+                del self._health[h]
 
     def get_logs(self, limit: int = 100) -> list[str]:
         """Return the most recent libtorrent alert log entries."""
@@ -334,6 +394,7 @@ class TorrentClient:
 
                 # Write torrents.csv
                 torrents = await self.get_torrents()
+                self._check_health(torrents)   # emit healthy/stalled transitions
                 csv_path = self._state_dir / "torrents.csv"
                 buf = io.StringIO()
                 fields = [

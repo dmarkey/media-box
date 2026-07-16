@@ -56,14 +56,17 @@ _torrent_client()
 # ---------------------------------------------------------------------------
 # Server-push events
 #
-# Completion events are ROUTED, not broadcast: a client only receives events
-# for torrents it registered interest in — automatically when it adds one via
+# Events are ROUTED, not broadcast: a client only receives events for torrents
+# it registered interest in — automatically when it adds one via
 # torrent_download, or explicitly via torrent_watch. Interest is keyed by
 # client identity (clientInfo.name from the MCP handshake), so it survives
 # reconnects: delivery goes to that client's most recently subscribed session
 # (subscribe_events), falling back to the session that registered interest.
-# Interest is consumed when the event fires (completion is terminal), which
-# also dedupes recheck/restart re-fires. Requires stateful sessions
+#
+# Event types: torrent_healthy / torrent_stalled fire during the download and
+# LEAVE interest in place (a torrent can stall, recover, stall again); only
+# torrent_finished is terminal — it CONSUMES the interest, which also dedupes
+# libtorrent recheck/restart re-fires. Requires stateful sessions
 # (MCP_STATELESS=false) — stateless sessions don't outlive a request.
 # ---------------------------------------------------------------------------
 
@@ -92,9 +95,17 @@ async def _deliver_event(data: dict, interested: dict) -> None:
             pass  # client gone; interest was already consumed
 
 
-def _on_torrent_finished(data: dict) -> None:
-    # called from the alert pump (already on the event loop); never block it
-    interested = _torrent_interest.pop(str(data.get("hash", "")).lower(), None)
+_TERMINAL_EVENTS = {"torrent_finished"}
+
+
+def _on_torrent_event(event_type: str, data: dict) -> None:
+    # called from the alert pump / status loop (already on the event loop)
+    data = {"event": event_type, **data}   # always carry the type in the payload
+    key = str(data.get("hash", "")).lower()
+    if event_type in _TERMINAL_EVENTS:
+        interested = _torrent_interest.pop(key, None)  # terminal: consume
+    else:
+        interested = _torrent_interest.get(key)        # progress: leave in place
     if not interested:
         return  # nobody asked about this torrent
     try:
@@ -103,19 +114,20 @@ def _on_torrent_finished(data: dict) -> None:
         pass  # no loop (e.g. during shutdown) — nothing to deliver to anyway
 
 
-_torrent_client().on_torrent_finished = _on_torrent_finished
+_torrent_client().on_torrent_event = _on_torrent_event
 
 
 @mcp.tool()
 async def subscribe_events(ctx: Context) -> str:
     """Register this session as your delivery channel for server events.
 
-    Events are per-torrent and routed: you receive a completion event only for
-    torrents you added (torrent_download) or asked to watch (torrent_watch).
-    They arrive as MCP log notifications with logger="events" and a JSON
-    payload like {"event": "torrent_finished", "name", "hash", "save_path"}.
-    Call this after connecting (and again after reconnecting); repeat calls
-    are harmless.
+    Events are per-torrent and routed: you receive events only for torrents you
+    added (torrent_download) or asked to watch (torrent_watch). They arrive as
+    MCP log notifications with logger="events" and a JSON payload {"event", …}.
+    Event types: "torrent_healthy" (downloading with seeders), "torrent_stalled"
+    (progress dried up — may recover and re-announce healthy), "torrent_finished"
+    (complete; includes "save_path"). Call this after connecting (and again
+    after reconnecting); repeat calls are harmless.
     """
     if mcp.settings.stateless_http:
         return ("Cannot subscribe: the server is running stateless "
