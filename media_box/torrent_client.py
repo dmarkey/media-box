@@ -155,6 +155,7 @@ class TorrentClient:
         # Background reaper: remove torrents that downloaded nothing at all
         # within this many seconds of being added (0 disables)
         self._dead_timeout = int(config.TORRENT_DEAD_TIMEOUT or 6 * 3600)
+        self._started_at = time.time()
 
         # Create libtorrent session with sane defaults for a media box:
         # - Generous connection limits and fast peer ramp-up for quick downloads
@@ -411,10 +412,23 @@ class TorrentClient:
         """
         if self._dead_timeout <= 0 or t.get("progress", 0) > 0:
             return False
-        added_on = t.get("added_on") or 0
-        if not added_on or time.time() - added_on < self._dead_timeout:
+        # Still verifying files: progress reads 0 until the check finishes
+        if str(t.get("state", "")).startswith("checking"):
             return False
         h = t["hash"]
+        # Ever completed: a torrent restored without resume data refetches
+        # metadata and reads 0% for a while — it isn't dead, its data is on disk
+        if (self._meta.get(h) or {}).get("completed_on"):
+            return False
+        # Time "no progress" from when this session started tracking it, not
+        # from when it was first added: right after a restart every restored
+        # torrent reads 0% until metadata/resume data are processed.
+        added_on = t.get("added_on") or 0
+        if not added_on:
+            return False
+        since = max(added_on, self._started_at)
+        if time.time() - since < self._dead_timeout:
+            return False
         logger.info(f"Removing dead torrent {t.get('name')} ({h[:12]}): "
                     f"no progress after {self._dead_timeout}s")
         self._remove(h, delete_files=True)
