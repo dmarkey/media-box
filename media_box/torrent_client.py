@@ -42,6 +42,12 @@ def _detect_default_route_ip() -> str:
         return "0.0.0.0"
 
 
+# Resume data must carry the metadata (info dict): without it a restored
+# torrent has to refetch metadata from the swarm — impossible while paused
+# (finished torrents read 0 B / 0% forever) or when the swarm is dead.
+_RESUME_FLAGS = lt.save_resume_flags_t.flush_disk_cache | lt.save_resume_flags_t.save_info_dict
+
+
 def _bool(value: str | None, default: bool) -> bool:
     """Parse a config string as boolean."""
     if value is None:
@@ -270,7 +276,7 @@ class TorrentClient:
             status = handle.status()
             if not status.has_metadata:
                 return
-            handle.save_resume_data(lt.save_resume_flags_t.flush_disk_cache)
+            handle.save_resume_data(_RESUME_FLAGS)
         except Exception:
             pass
 
@@ -280,7 +286,7 @@ class TorrentClient:
         for h in self._handles.values():
             try:
                 if h.is_valid() and h.status().has_metadata:
-                    h.save_resume_data(lt.save_resume_flags_t.flush_disk_cache)
+                    h.save_resume_data(_RESUME_FLAGS)
                     outstanding += 1
             except Exception:
                 pass
