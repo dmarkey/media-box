@@ -407,7 +407,8 @@ def _find_unique_torrent(torrents: list[dict], query: str) -> tuple[Optional[dic
     return matches[0], ""
 
 
-_DONE_STATES = {"uploading", "stalledUP", "pausedUP"}
+_DONE_STATES = {"uploading", "stalledUP", "pausedUP", "queuedUP"}
+_QUEUED_STATE = "queuedDL"
 _ERROR_STATES = {"error", "missingFiles"}
 _NO_SEEDERS_TIMEOUT = int(config.get_env("TORRENT_STALL_TIMEOUT") or 120)
 # Most recent search per client (keyed like event interest, by
@@ -618,6 +619,7 @@ async def torrent_download(
 
     async def _monitor() -> str:
         payload_checked = False
+        queued_for = 0
         interval = 5
         elapsed = 0
         name = title
@@ -686,6 +688,22 @@ async def torrent_download(
                 error_msg += "\nCheck save_path is writable and has enough disk space. Use torrent_logs() for more detail."
                 return error_msg
 
+            # Waiting for a download slot (libtorrent's queue): it has no peers
+            # because it hasn't started — not dead. Report it rather than
+            # sitting out the stall timeout and deleting a good torrent.
+            if state == _QUEUED_STATE:
+                queued_for += interval
+                if queued_for >= 10:  # not a momentary queue-manager blip
+                    n_dl = sum(1 for t in torrents if t.get("state") in ("downloading", "stalledDL", "metaDL"))
+                    n_q = sum(1 for t in torrents if t.get("state") == _QUEUED_STATE)
+                    return (
+                        f"QUEUED: {name} ({t_hash[:12]})\n"
+                        f"Waiting for a download slot — {n_dl} downloading, {n_q} queued. "
+                        f"It starts automatically when a slot frees up (you'll get a "
+                        f"torrent_healthy event if subscribed). This is not a dead torrent: "
+                        f"don't delete or replace it. Tell the user it's queued."
+                    )
+
             # Seeders connected and progress advanced between two polls — it's
             # demonstrably healthy, so return now instead of making the caller
             # sit out the rest of the window.
@@ -699,8 +717,10 @@ async def torrent_download(
                 )
             prev_progress = progress
 
-            # No seeders after the stall timeout — dead torrent, remove it
-            if elapsed >= _NO_SEEDERS_TIMEOUT and not ever_had_seeders and progress < 1.0:
+            # No seeders after the stall timeout (time spent queued doesn't
+            # count) — dead torrent, remove it
+            if (elapsed - queued_for >= _NO_SEEDERS_TIMEOUT and not ever_had_seeders
+                    and progress < 1.0 and state != _QUEUED_STATE):
                 await client.delete_torrent(t_hash, delete_files=True)
                 return (
                     f"DEAD TORRENT (removed): {name} — no seeders after {_NO_SEEDERS_TIMEOUT}s ({t_hash[:12]}). "
@@ -930,6 +950,7 @@ async def torrent_wait(query: str, timeout: int = 1800) -> str:
     t_hash = torrent["hash"]
     name = torrent.get("name", t_hash[:12])
     elapsed = 0
+    queued_for = 0  # time spent waiting for a download slot
     ever_had_seeders = False
     last_status = ""
 
@@ -969,7 +990,10 @@ async def torrent_wait(query: str, timeout: int = 1800) -> str:
             error_msg += "\nCheck save_path is writable and has enough disk space. Use torrent_logs() for more detail."
             return error_msg
 
-        if elapsed >= _NO_SEEDERS_TIMEOUT and not ever_had_seeders and progress < 1.0:
+        if state == _QUEUED_STATE:
+            queued_for += interval
+        elif (elapsed - queued_for >= _NO_SEEDERS_TIMEOUT and not ever_had_seeders
+                and progress < 1.0):
             await client.delete_torrent(t_hash, delete_files=True)
             return (
                 f"DEAD TORRENT (removed): {name} — no seeders after {_NO_SEEDERS_TIMEOUT}s ({t_hash[:12]}). "

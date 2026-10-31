@@ -67,6 +67,8 @@ STATE_MAP = {
     "paused": "Paused",
     "completed": "Completed",
     "queued": "Queued",
+    "queuedDL": "Queued",       # waiting for a download slot (active_downloads)
+    "queuedUP": "Completed",    # finished, waiting for a seeding slot
     "checking": "Checking",
     "error": "Error",
     "missing": "Missing",
@@ -187,8 +189,14 @@ class TorrentClient:
             "upload_rate_limit": int(config.TORRENT_UPLOAD_RATE_LIMIT or 1024 * 1024),  # 1 MB/s
             "announce_to_all_trackers": _bool(config.TORRENT_ANNOUNCE_ALL_TRACKERS, True),
             "announce_to_all_tiers": _bool(config.TORRENT_ANNOUNCE_ALL_TIERS, True),
-            "active_downloads": int(config.TORRENT_ACTIVE_DOWNLOADS or 8),
+            # Queue limits. Downloads beyond active_downloads wait (queued);
+            # active_limit caps downloads + seeds together, so it must leave
+            # room for downloads while finished torrents seed out their hour
+            # (libtorrent's default of 15 let a batch's seeding episodes
+            # squeeze out new downloads).
+            "active_downloads": int(config.TORRENT_ACTIVE_DOWNLOADS or 20),
             "active_seeds": int(config.TORRENT_ACTIVE_SEEDS or 10),
+            "active_limit": int(config.TORRENT_ACTIVE_LIMIT or 40),
             # Deeper request pipelining and send buffer for fast lines
             "max_out_request_queue": 1500,
             "send_buffer_watermark": 3 * 1024 * 1024,
@@ -374,7 +382,7 @@ class TorrentClient:
         # must run regardless; _emit_event is a no-op without a listener)
         # states that aren't an in-flight download: nothing to judge
         idle = {"uploading", "stalledUP", "pausedUP", "pausedDL", "completed",
-                "paused", "seeding", "error"}
+                "paused", "seeding", "error", "queuedDL", "queuedUP"}
         live = set()
         for t in torrents:
             h = t.get("hash")
@@ -662,6 +670,11 @@ class TorrentClient:
                     state_str = "completed"
                 else:
                     state_str = "paused"
+            elif status.paused and status.auto_managed:
+                # paused by libtorrent's queue manager: waiting for a slot.
+                # Not stalled and not dead — it has no peers because it
+                # hasn't been started yet.
+                state_str = "queued_up" if (status.is_finished or status.is_seeding) else "queued_dl"
             elif status.is_seeding:
                 state_str = "seeding"
 
@@ -682,7 +695,11 @@ class TorrentClient:
             added_on = meta.get("added_on", 0)
             age = time.time() - added_on if added_on else float("inf")
 
-            if state_str == "metadata":
+            if state_str == "queued_dl":
+                friendly_state = "queuedDL"
+            elif state_str == "queued_up":
+                friendly_state = "queuedUP"
+            elif state_str == "metadata":
                 friendly_state = "metaDL"
             elif state_str == "downloading" and status.num_seeds == 0:
                 # Recently-added torrents haven't had time to find peers yet

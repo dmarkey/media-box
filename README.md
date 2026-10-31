@@ -71,7 +71,8 @@ TORRENT_DOWNLOAD_RATE_LIMIT=0      # bytes/s, 0 = unlimited
 TORRENT_UPLOAD_RATE_LIMIT=1048576  # bytes/s
 TORRENT_ENCRYPTION=forced          # forced/enabled/disabled — "enabled" sees more peers (faster), "forced" is more private
 TORRENT_ANNOUNCE_ALL_TRACKERS=true # announce to every tracker, not just the first working one
-TORRENT_ACTIVE_DOWNLOADS=8         # simultaneous active downloads before queueing
+TORRENT_ACTIVE_DOWNLOADS=20        # simultaneous active downloads; more are queued (reported as QUEUED, never treated as dead)
+TORRENT_ACTIVE_LIMIT=40            # max active torrents, downloading + seeding
 TORRENT_SEED_RATIO=1.0             # stop seeding at this ratio
 TORRENT_SEED_TIME=60               # or after this many minutes
 TORRENT_STALL_TIMEOUT=120          # torrent_download/torrent_wait remove torrents with no seeders after N seconds

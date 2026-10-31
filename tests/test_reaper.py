@@ -60,3 +60,12 @@ def test_fresh_torrent_not_reaped(client):
 def test_partial_progress_never_reaped(client):
     client._started_at -= 2 * SIX_H
     assert not client._reap_if_dead(torrent("a", added_ago=90 * 86400, progress=0.01, state="stalledDL"))
+
+
+def test_queued_torrent_never_reaped(client):
+    # 2026-10-31: torrents waiting for a download slot read 0% with no peers;
+    # they must not be treated as dead (by the reaper or the health checks)
+    client._started_at -= 2 * SIX_H
+    client.on_torrent_event = None
+    client._check_health([torrent("q", added_ago=90 * 86400, state="queuedDL")])
+    assert client.removed == []

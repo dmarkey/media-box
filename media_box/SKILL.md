@@ -53,6 +53,7 @@ That's it — the tool resolves the download link, adds it to the torrent client
 - **DOWNLOADING** — seeders connected and progress advancing; check back later with `torrent_info` or wait with `torrent_wait`
 - **Complete** — small/fast torrents may finish within the window; save path included
 - **DEAD TORRENT (removed)** — no seeders; try the next search result
+- **QUEUED** — waiting for a free download slot (many downloads at once). It starts by itself; do NOT delete or replace it — tell the user it's queued
 - **REJECTED (removed)** — the files were executables or contained no video (fake); try another result
 - A trailing **WARNING: payload is an archive** — it downloaded, but needs extracting before the mover can import it; tell the user
 - **ERROR / SLOW START** — report to the user and decide together
