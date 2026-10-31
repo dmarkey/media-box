@@ -132,7 +132,7 @@ TORRENT_ANNOUNCE_ALL_TRACKERS = get_env("TORRENT_ANNOUNCE_ALL_TRACKERS")  # anno
 TORRENT_ANNOUNCE_ALL_TIERS = get_env("TORRENT_ANNOUNCE_ALL_TIERS")  # announce to all tracker tiers (default: true)
 TORRENT_ACTIVE_DOWNLOADS = get_env("TORRENT_ACTIVE_DOWNLOADS")  # simultaneous active downloads before queueing (default: 20)
 TORRENT_ACTIVE_SEEDS = get_env("TORRENT_ACTIVE_SEEDS")  # simultaneous active seeds (default: 10)
-TORRENT_ACTIVE_LIMIT = get_env("TORRENT_ACTIVE_LIMIT")  # max active torrents, downloading + seeding (default: 40)
+TORRENT_ACTIVE_LIMIT = get_env("TORRENT_ACTIVE_LIMIT")  # max active torrents, downloading + seeding (default: libtorrent's, 500)
 TORRENT_DOWNLOAD_RATE_LIMIT = get_env("TORRENT_DOWNLOAD_RATE_LIMIT")  # bytes/s, 0 = unlimited (default: 0)
 TORRENT_UPLOAD_RATE_LIMIT = get_env("TORRENT_UPLOAD_RATE_LIMIT")  # bytes/s (default: 1048576 = 1MB/s)
 TORRENT_ENABLE_DHT = get_env("TORRENT_ENABLE_DHT")  # true/false (default: true)

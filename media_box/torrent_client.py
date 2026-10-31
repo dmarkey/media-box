@@ -189,14 +189,10 @@ class TorrentClient:
             "upload_rate_limit": int(config.TORRENT_UPLOAD_RATE_LIMIT or 1024 * 1024),  # 1 MB/s
             "announce_to_all_trackers": _bool(config.TORRENT_ANNOUNCE_ALL_TRACKERS, True),
             "announce_to_all_tiers": _bool(config.TORRENT_ANNOUNCE_ALL_TIERS, True),
-            # Queue limits. Downloads beyond active_downloads wait (queued);
-            # active_limit caps downloads + seeds together, so it must leave
-            # room for downloads while finished torrents seed out their hour
-            # (libtorrent's default of 15 let a batch's seeding episodes
-            # squeeze out new downloads).
+            # Queue limits: downloads beyond active_downloads wait (queued).
+            # A batch (e.g. a season of episodes) needs plenty of slots.
             "active_downloads": int(config.TORRENT_ACTIVE_DOWNLOADS or 20),
             "active_seeds": int(config.TORRENT_ACTIVE_SEEDS or 10),
-            "active_limit": int(config.TORRENT_ACTIVE_LIMIT or 40),
             # Deeper request pipelining and send buffer for fast lines
             "max_out_request_queue": 1500,
             "send_buffer_watermark": 3 * 1024 * 1024,
@@ -209,6 +205,11 @@ class TorrentClient:
                 | lt.alert.category_t.storage_notification
             ),
         }
+
+        # Overall active cap (downloads + seeds): libtorrent 2.x defaults to
+        # 500, so only override when configured
+        if config.TORRENT_ACTIVE_LIMIT:
+            settings["active_limit"] = int(config.TORRENT_ACTIVE_LIMIT)
 
         # Encryption forced by default for privacy
         enc = (config.TORRENT_ENCRYPTION or "forced").lower()
