@@ -14,8 +14,6 @@ import csv
 import io
 import json
 import logging
-import os
-import shutil
 import socket
 import time
 from pathlib import Path
@@ -97,6 +95,19 @@ def _tracker_scrape(tracker: dict) -> tuple[int, int]:
     return max(seeds, 0), max(peers, 0)
 
 
+def _share_ratio(status) -> float:
+    """Upload/download ratio across restarts (0 when nothing downloaded yet).
+
+    Uses the all-time counters: total_upload resets every session, which
+    restarted the seeding-ratio clock on each server restart. libtorrent 2.x
+    has no status.ratio.
+    """
+    downloaded = max(status.all_time_download, status.total_wanted_done)
+    if downloaded <= 0:
+        return 0.0
+    return status.all_time_upload / downloaded
+
+
 def _lt_state_to_str(state: int) -> str:
     """Convert libtorrent torrent_status.state enum to a string."""
     mapping = {
@@ -141,6 +152,9 @@ class TorrentClient:
         # Seeding policy — seed to 1.0 ratio or 60 min, whichever comes first
         self._seed_ratio = float(config.TORRENT_SEED_RATIO or 1.0)
         self._seed_time = int(config.TORRENT_SEED_TIME or 60) * 60  # config is minutes, store as seconds
+        # Background reaper: remove torrents that downloaded nothing at all
+        # within this many seconds of being added (0 disables)
+        self._dead_timeout = int(config.TORRENT_DEAD_TIMEOUT or 6 * 3600)
 
         # Create libtorrent session with sane defaults for a media box:
         # - Generous connection limits and fast peer ramp-up for quick downloads
@@ -259,8 +273,8 @@ class TorrentClient:
         except Exception:
             pass
 
-    def _save_all_resume_data(self):
-        """Save resume data for all torrents."""
+    def _save_all_resume_data(self, timeout: float = 15.0):
+        """Save resume data for all torrents (waits up to *timeout* seconds)."""
         outstanding = 0
         for h in self._handles.values():
             try:
@@ -269,9 +283,11 @@ class TorrentClient:
                     outstanding += 1
             except Exception:
                 pass
-        # Wait for all save_resume_data alerts to come back
-        while outstanding > 0:
-            self._session.wait_for_alert(5000)
+        # Wait for the save_resume_data alerts to come back — bounded, so a
+        # lost alert can't hang shutdown forever
+        deadline = time.monotonic() + timeout
+        while outstanding > 0 and time.monotonic() < deadline:
+            self._session.wait_for_alert(1000)
             alerts = self._session.pop_alerts()
             for alert in alerts:
                 if isinstance(alert, (lt.save_resume_data_alert, lt.save_resume_data_failed_alert)):
@@ -292,10 +308,15 @@ class TorrentClient:
             except RuntimeError:
                 pass  # no event loop yet
 
-    def _process_alerts(self, timeout: float = 0.1):
-        """Process libtorrent alerts (saves resume data to disk)."""
+    def _process_alerts(self, timeout: float = 0):
+        """Process pending libtorrent alerts (saves resume data, fires events).
+
+        timeout > 0 blocks the calling thread (and so the event loop) waiting
+        for an alert — only use that where the caller really needs to wait.
+        """
         self._ensure_status_writer()
-        self._session.wait_for_alert(int(timeout * 1000))
+        if timeout > 0:
+            self._session.wait_for_alert(int(timeout * 1000))
         alerts = self._session.pop_alerts()
         for alert in alerts:
             # Log every alert to the ring buffer for diagnostics
@@ -342,11 +363,11 @@ class TorrentClient:
         while still incomplete. Each fires once per transition, so a torrent
         that recovers from a stall re-announces healthy.
         """
-        if self.on_torrent_event is None:
-            return
+        # (no early return when nobody listens: the dead-torrent reaper below
+        # must run regardless; _emit_event is a no-op without a listener)
         # states that aren't an in-flight download: nothing to judge
-        idle = {"uploading", "stalledUP", "pausedUP", "completed", "paused",
-                "seeding", "error"}
+        idle = {"uploading", "stalledUP", "pausedUP", "pausedDL", "completed",
+                "paused", "seeding", "error"}
         live = set()
         for t in torrents:
             h = t.get("hash")
@@ -355,6 +376,8 @@ class TorrentClient:
             live.add(h)
             if t.get("state") in idle:
                 self._health.pop(h, None)
+                continue
+            if self._reap_if_dead(t):
                 continue
             st = self._health.setdefault(h, {"stall": 0, "healthy": False,
                                              "stalled": False})
@@ -377,16 +400,63 @@ class TorrentClient:
             if h not in live:
                 del self._health[h]
 
+    def _reap_if_dead(self, t: dict) -> bool:
+        """Remove a torrent that has downloaded nothing for _dead_timeout seconds.
+
+        torrent_download / torrent_wait only reap dead torrents while a client
+        is watching; this catches the rest (e.g. one left "waiting it out" for
+        months). Deliberately conservative: only torrents with zero progress
+        are removed — a partially downloaded torrent that stalls is left alone
+        (it gets a torrent_stalled event instead), since its data has value.
+        """
+        if self._dead_timeout <= 0 or t.get("progress", 0) > 0:
+            return False
+        added_on = t.get("added_on") or 0
+        if not added_on or time.time() - added_on < self._dead_timeout:
+            return False
+        h = t["hash"]
+        logger.info(f"Removing dead torrent {t.get('name')} ({h[:12]}): "
+                    f"no progress after {self._dead_timeout}s")
+        self._remove(h, delete_files=True)
+        self._health.pop(h, None)
+        self._emit_event("torrent_dead", {
+            "name": t.get("name"), "hash": h,
+            "reason": f"no download progress after {self._dead_timeout // 3600}h; removed",
+        })
+        return True
+
     def get_logs(self, limit: int = 100) -> list[str]:
         """Return the most recent libtorrent alert log entries."""
         return list(self._alert_log)[-limit:]
 
+    def start_background(self) -> None:
+        """Start the background alert/status loop. Call once the event loop runs.
+
+        Without this the loop only starts on the first tool call, so after a
+        restart with no client connected, seeding limits, dead-torrent cleanup
+        and completion events would all wait for someone to call a tool.
+        """
+        self._ensure_status_writer()
+
+    # alerts (completion events, resume data) are pumped this often; the
+    # heavier status pass (seeding policy, health, csv) runs every
+    # _STATUS_EVERY pumps
+    _ALERT_INTERVAL = 2
+    _STATUS_EVERY = 15
+
     async def _write_status_loop(self):
-        """Write torrents.csv and logs.txt to state_dir every 30 seconds."""
+        """Pump alerts every 2s; enforce policy and write torrents.csv/logs.txt every 30s."""
+        tick = 0
         while True:
-            await asyncio.sleep(30)
+            await asyncio.sleep(self._ALERT_INTERVAL)
+            tick += 1
             try:
-                self._process_alerts(timeout=0.1)
+                self._process_alerts()
+            except Exception as e:
+                logger.debug(f"Alert processing failed: {e}")
+            if tick % self._STATUS_EVERY:
+                continue
+            try:
 
                 # Write logs.txt
                 logs_path = self._state_dir / "logs.txt"
@@ -514,8 +584,8 @@ class TorrentClient:
             "source": magnet_or_path if magnet_or_path.startswith("magnet:") else "",
         }
         self._save_meta()
-        self._save_resume_data(handle)
-        self._process_alerts(timeout=1)
+        self._save_resume_data(handle)  # the background loop writes it out
+        self._process_alerts()
 
         logger.info(f"Added torrent: {handle.name()} ({info_hash[:12]})")
         return info_hash
@@ -541,9 +611,10 @@ class TorrentClient:
             status = handle.status()
             state_str = _lt_state_to_str(status.state)
 
-            # Enforce seeding policy — auto-pause when limits are met
+            ratio = _share_ratio(status)
+
+            # Enforce seeding policy — stop seeding when limits are met
             if status.is_seeding and not status.paused:
-                ratio = status.total_upload / max(status.total_wanted_done, 1)
                 raw_seed_time = status.seeding_duration if hasattr(status, "seeding_duration") else 0
                 # libtorrent may return timedelta or int depending on version
                 seed_time = raw_seed_time.total_seconds() if hasattr(raw_seed_time, "total_seconds") else int(raw_seed_time)
@@ -553,13 +624,21 @@ class TorrentClient:
                 if self._seed_time > 0 and seed_time >= self._seed_time:
                     should_stop = True
                 if should_stop:
+                    # pause() alone is a no-op on an auto-managed torrent: the
+                    # queue manager resumes it straight away. Take it out of
+                    # auto-management first so the pause sticks.
+                    handle.unset_flags(lt.torrent_flags.auto_managed)
                     handle.pause()
+                    self._save_resume_data(handle)  # persist the paused state
                     meta["completed_on"] = meta.get("completed_on") or int(time.time())
                     self._save_meta()
+                    status = handle.status()
 
             # Match qBittorrent's paused states
             if status.paused and not status.auto_managed:
-                if status.is_finished:
+                # after a restart a paused torrent isn't re-checked, so
+                # is_finished reads False — completed_on remembers it finished
+                if status.is_finished or meta.get("completed_on"):
                     state_str = "completed"
                 else:
                     state_str = "paused"
@@ -629,9 +708,7 @@ class TorrentClient:
                 "size": status.total_wanted,
                 "downloaded": status.total_wanted_done,
                 "uploaded": status.total_upload,
-                "ratio": float(status.ratio) if hasattr(status, "ratio") else (
-                    status.total_upload / max(status.total_wanted_done, 1)
-                ),
+                "ratio": ratio,
                 "save_path": status.save_path,
                 "category": meta.get("category", ""),
                 "tags": meta.get("tags", ""),
@@ -718,6 +795,9 @@ class TorrentClient:
         self, torrent_hash: str, delete_files: bool = False,
     ) -> None:
         """Remove a torrent."""
+        self._remove(torrent_hash, delete_files=delete_files)
+
+    def _remove(self, torrent_hash: str, delete_files: bool = False) -> None:
         handle = self._handles.pop(torrent_hash, None)
         if handle and handle.is_valid():
             if delete_files:

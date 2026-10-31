@@ -117,6 +117,9 @@ JELLYFIN_API_KEY = get_env("JELLYFIN_API_KEY")
 # Torrent search (pyackett)
 TORRENT_INDEXERS = get_env("TORRENT_INDEXERS")  # comma-separated: 1337x,therarbg,thepiratebay
 TORRENT_SEARCH_PROXY = get_env("TORRENT_SEARCH_PROXY")  # socks5://user:pass@host:port (for indexer websites)
+TORRENT_API_SOURCES = get_env("TORRENT_API_SOURCES")  # JSON-API sources searched alongside TORRENT_INDEXERS (default: knaben,eztv-api; "none" disables)
+TORRENT_SEARCH_DEADLINE = get_env("TORRENT_SEARCH_DEADLINE")  # seconds to wait for indexers before returning what has arrived (default: 12)
+TORRENT_CANARY_INTERVAL = get_env("TORRENT_CANARY_INTERVAL")  # hours between background indexer health probes (default: 6, 0 disables)
 
 # Torrent client (libtorrent)
 TORRENT_PORT = get_env("TORRENT_PORT")  # listen port (default: 6881)
@@ -143,6 +146,7 @@ TORRENT_ANONYMOUS_MODE = get_env("TORRENT_ANONYMOUS_MODE")  # true/false (defaul
 TORRENT_PROXY_URL = get_env("TORRENT_PROXY_URL")  # socks5://host:port for libtorrent peer traffic
 TORRENT_LISTEN_INTERFACE = get_env("TORRENT_LISTEN_INTERFACE")  # IP to bind libtorrent (default: auto-detect default route)
 TORRENT_STALL_TIMEOUT = get_env("TORRENT_STALL_TIMEOUT")  # seconds before removing a torrent with no seeders (default: 120)
+TORRENT_DEAD_TIMEOUT = get_env("TORRENT_DEAD_TIMEOUT")  # seconds after which a torrent that has downloaded nothing is removed in the background (default: 21600 = 6h, 0 disables)
 
 # Storage
 TEMP_DOWNLOAD_LOCATION = get_env("TEMP_DOWNLOAD_LOCATION", "TEMPORARY_DOWNLOAD_LOCATION")

@@ -14,14 +14,15 @@ jellyfin_episodes(series_id, season?)    — list episodes for a series
 jellyfin_refresh()                       — trigger a library scan
 jellyfin_devices()                       — list devices that accept remote playback control
 jellyfin_play(session_id, item_id)       — start playback on a remote device
-jellyfin_command(session_id, command)    — send a playback command (Pause, Stop, SetVolume, ...)
+jellyfin_command(session_id, command, volume?) — send a playback command (Pause, Stop, Mute, SetVolume + volume 0-100, ...)
 
-torrent_search(query, category?, limit?, sort?)  — search for torrents (category: "movies", "tv"; sort: "seeders", "size")
+torrent_search(query, category?, limit?, sort?, imdb?)  — search all indexers (category: "movies", "tv"; sort: "seeders", "size")
+torrent_indexers(reset?, probe?)         — indexer health; use when searches look degraded
 torrent_download(number, timeout?, category?, tag?, search_id?)  — download result #N; returns as soon as health is proven (usually 10-20s, up to ~2 min for slow starters) while the download continues
 torrent_list(filter?, category?, state?)  — list active/completed torrents
 torrent_info(query)                      — detailed torrent info (query by name or hash prefix)
 torrent_peers(query)                     — list connected peers for a torrent
-torrent_delete(query, delete_files?)     — delete a torrent (query by name or hash prefix)
+torrent_delete(query, delete_files?)     — delete a torrent (query by name or hash prefix; must match exactly one)
 torrent_wait(query, timeout?)            — wait for a torrent to complete (BLOCKING — use subagent)
 torrent_watch(query)                     — get a completion EVENT for an existing torrent (non-blocking)
 subscribe_events()                       — register this session to receive completion events
@@ -44,7 +45,7 @@ mover_tv_batch(moves, show, season, force?, torrent_hash?)  — move multiple TV
 `torrent_search` returns a numbered list. To download result #3:
 
 ```
-torrent_download(number=3, category="tv")
+torrent_download(number=3, search_id="a1b2c3", category="tv")
 ```
 
 That's it — the tool resolves the download link, adds it to the torrent client, and monitors it just long enough to prove health (usually 10-20 seconds; up to ~2 minutes for slow starters). It returns one of:
@@ -52,9 +53,11 @@ That's it — the tool resolves the download link, adds it to the torrent client
 - **DOWNLOADING** — seeders connected and progress advancing; check back later with `torrent_info` or wait with `torrent_wait`
 - **Complete** — small/fast torrents may finish within the window; save path included
 - **DEAD TORRENT (removed)** — no seeders; try the next search result
+- **REJECTED (removed)** — the files were executables or contained no video (fake); try another result
+- A trailing **WARNING: payload is an archive** — it downloaded, but needs extracting before the mover can import it; tell the user
 - **ERROR / SLOW START** — report to the user and decide together
 
-You **never** need to handle magnet links, hashes, or URLs. Just the result number. Each search prints a `search id` — pass it as `search_id` only if you need a result from an *earlier* search; by default the most recent search is used.
+You **never** need to handle magnet links, hashes, or URLs. Just the result number. Each search prints a `search id` — always pass it as `search_id`. Omitted, it falls back to your most recent search, which on a shared (stateless) server may be another agent's.
 
 ---
 
@@ -139,6 +142,12 @@ torrent_search(query="Breaking Bad S03", category="tv")
 torrent_search(query="Breaking Bad S03E07", category="tv")
 ```
 
+Reading the results:
+- Duplicates across indexers are already merged ("Knaben +2" = three indexers carry it).
+- The **Note** column flags suspicious rows (`archive`, `executable?`, `small for 1080p`) — prefer clean rows. Results are not pre-filtered; skip anything that's clearly the wrong title.
+- The **Indexers:** line says what each indexer returned. If it says **search is degraded**, few results may not mean the release doesn't exist — say so rather than "not available".
+- Thin results are retried automatically with simpler queries ("Also tried: ..."), so don't burn your second search on the same query with punctuation removed.
+
 Pick the best option based on:
 1. **Seeders** — more is better (dead torrents with 0 seeders are already filtered out)
 2. **Size** — reasonable for the content
@@ -148,14 +157,14 @@ Pick the best option based on:
 ### Step 5 — Download
 
 ```
-torrent_download(number=3, category="tv", tag="breaking-bad-s03")
+torrent_download(number=3, search_id="a1b2c3", category="tv", tag="breaking-bad-s03")
 ```
 
 - The `number` is from the search results table
 - Use `category="tv"` for TV shows, `category="movies"` for movies
 - **Always use `tag`** with a short, unique, lowercase label
 - `torrent_download` returns as soon as the torrent proves healthy (usually 10-20 seconds) — the download keeps running in the background. If it reports DOWNLOADING, tell the user it's in progress.
-- **Events**: if your client is subscribed (`subscribe_events`), every torrent you add (or `torrent_watch`) pushes events automatically — `torrent_healthy` when it starts downloading with seeders, `torrent_stalled` if progress dries up (it may recover and re-announce healthy), and `torrent_finished` when complete (with `save_path`). You are only notified about torrents you added or watch, never anyone else's. So you do NOT need `torrent_wait` just to learn about completion — use it (in a subagent) only when you must block until completion before a next step (e.g. moving files immediately). Relay a stalled event to the user only if it stays stalled or they're waiting on it; a brief stall that recovers usually isn't worth a message.
+- **Events**: if your client is subscribed (`subscribe_events`), every torrent you add (or `torrent_watch`) pushes events automatically — `torrent_healthy` when it starts downloading with seeders, `torrent_stalled` if progress dries up (it may recover and re-announce healthy), `torrent_finished` when complete (with `save_path`), and `torrent_dead` if it downloaded nothing for hours and the server removed it (pick another result). You are only notified about torrents you added or watch, never anyone else's. So you do NOT need `torrent_wait` just to learn about completion — use it (in a subagent) only when you must block until completion before a next step (e.g. moving files immediately). Relay a stalled event to the user only if it stays stalled or they're waiting on it; a brief stall that recovers usually isn't worth a message.
 
 > **CRITICAL — `torrent_wait` is a BLOCKING call that waits for the full download (minutes to hours). You MUST run it in a subagent or background task. NEVER call it in the main conversation thread — doing so freezes the chat completely and the user cannot interact until the download finishes. This is the #1 most important rule. Do NOT poll `torrent_info` in a loop either.**
 

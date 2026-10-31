@@ -14,7 +14,7 @@ An LLM connected to this server can handle requests like *"download Breaking Bad
 6. Move and rename files to match Jellyfin conventions
 7. Trigger a library refresh
 
-The server exposes 24 tools across four services. It ships with an `instructions` prompt (`SKILL.md`) that teaches the LLM the full workflow, so it knows how to chain the tools together without extra prompting.
+The server exposes 27 tools across four services. It ships with an `instructions` prompt (`SKILL.md`) that teaches the LLM the full workflow, so it knows how to chain the tools together without extra prompting.
 
 The server runs as a persistent HTTP service (MCP streamable HTTP transport). The torrent client is embedded — downloads keep running and torrents keep seeding even while no MCP client is connected, and session state persists across restarts.
 
@@ -74,7 +74,8 @@ TORRENT_ANNOUNCE_ALL_TRACKERS=true # announce to every tracker, not just the fir
 TORRENT_ACTIVE_DOWNLOADS=8         # simultaneous active downloads before queueing
 TORRENT_SEED_RATIO=1.0             # stop seeding at this ratio
 TORRENT_SEED_TIME=60               # or after this many minutes
-TORRENT_STALL_TIMEOUT=120          # remove torrents with no seeders after N seconds
+TORRENT_STALL_TIMEOUT=120          # torrent_download/torrent_wait remove torrents with no seeders after N seconds
+TORRENT_DEAD_TIMEOUT=21600         # background cleanup: remove torrents that downloaded nothing within N seconds of being added (0 = off)
 TORRENT_PROXY_URL=                 # socks5://host:port for peer traffic (separate from search proxy)
 TORRENT_ANONYMOUS_MODE=false
 ```
@@ -99,6 +100,29 @@ Public indexers that work well (no account needed):
 | `torrentdownload` | torrentdownload.info | General. |
 
 Sites behind Cloudflare are handled automatically via [Camoufox](https://github.com/daijro/camoufox) (anti-detect Firefox). The first search to a CF-protected site takes ~5 seconds to solve the challenge; subsequent searches reuse the cached cookie.
+
+Two JSON-API sources are searched **in addition** to `TORRENT_INDEXERS`, no configuration needed:
+
+| Source ID | What | Notes |
+|---|---|---|
+| `knaben` | [Knaben](https://knaben.org) meta-search API | Aggregates many public trackers. Fast, no Cloudflare. |
+| `eztv-api` | EZTV JSON API | TV only, looked up by IMDb ID (resolved automatically from the show name via TVMaze). |
+
+### How search stays reliable
+
+- **Deadline:** all indexers run at once; whatever has answered after `TORRENT_SEARCH_DEADLINE` seconds (default 12) is returned, slower ones are reported as timed out and finish in the background (warming Cloudflare cookies for next time).
+- **Per-indexer status:** every search reports what each indexer did — results, empty, rate limited, blocked, timed out — so "nothing found" is distinguishable from "search is broken".
+- **Automatic benching:** an indexer that fails 3 times in a row (or rate-limits) is skipped for an escalating cooldown (15m → 1h → 6h → 24h), then gets one trial query; it rejoins as soon as it works. State persists in `~/.config/media-box/indexer_health.json`. See `torrent_indexers`.
+- **Background probes:** every `TORRENT_CANARY_INTERVAL` hours (default 6) each indexer is probed with a broad query — catches sites that answer but never match anything (broken definitions) and lets benched ones recover. Indexer definitions are also refreshed from upstream every 12h.
+- **Merging:** the same torrent from several indexers becomes one row (best seeder count, every source kept); if one site's download link is dead, the next one is used.
+- **Query variants:** if results are thin, simpler variants are tried automatically (`&` → `and`, punctuation stripped, year dropped, season pack instead of episode).
+- **Fake-download check:** once a torrent's file list is known, executables (`.exe`, `.lnk`, `.scr`, ...) or no video at all → removed and reported as REJECTED; archive-only payloads are kept with a warning. Search results are never filtered for quality — suspicious ones get a Note (archive, executable, too small for the resolution) and the model chooses.
+
+```ini
+TORRENT_API_SOURCES=knaben,eztv-api   # default; "none" disables
+TORRENT_SEARCH_DEADLINE=12            # seconds
+TORRENT_CANARY_INTERVAL=6             # hours, 0 disables
+```
 
 ### Private trackers
 
@@ -207,13 +231,13 @@ The `torrent_wait` tool blocks until a torrent finishes downloading, which can t
 | `jellyfin_refresh` | Trigger a library scan to detect new/removed files |
 | `jellyfin_devices` | List devices that accept remote playback control |
 | `jellyfin_play` | Start playing an item on a remote device |
-| `jellyfin_command` | Send a playback command (Pause, Stop, SetVolume, ...) to a device |
+| `jellyfin_command` | Send a playback command (Pause, Stop, Mute, SetVolume with `volume`, ...) to a device |
 
 ### Torrents
 
 | Tool | Description |
 |------|-------------|
-| `torrent_search` | Search for torrents across configured indexers. Returns a numbered list. |
+| `torrent_search` | Search all indexers (merged, deduplicated). Returns a numbered list plus each indexer's status. Optional `imdb` for ID-based sources. |
 | `torrent_download` | Download result #N from a search. Resolves the link, adds it to the client, and returns as soon as the torrent proves healthy (usually 10-20s) — dead torrents (no seeders) are auto-removed. |
 | `torrent_list` | List active/completed torrents with filters for name, category, state |
 | `torrent_info` | Detailed torrent info — progress, speed, ETA, trackers, save path, file list |
@@ -221,6 +245,7 @@ The `torrent_wait` tool blocks until a torrent finishes downloading, which can t
 | `torrent_wait` | Block until a torrent completes, errors, or times out |
 | `torrent_delete` | Delete a torrent by name or hash prefix, optionally removing files |
 | `torrent_logs` | Recent libtorrent engine logs for troubleshooting |
+| `torrent_indexers` | Indexer health: active/benched, success rate, latency, last result; `reset` to un-bench, `probe` to re-test now |
 
 ### TVMaze
 

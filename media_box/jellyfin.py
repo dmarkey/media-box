@@ -110,9 +110,25 @@ class JellyfinClient:
     async def send_playback_command(
         self, session_id: str, command: str
     ) -> None:
-        """Send a playback command (PlayPause, Stop, NextTrack, etc.)."""
+        """Send a playstate command (PlayPause, Stop, NextTrack, etc.)."""
         url = f"{self.base_url}/Sessions/{session_id}/Playing/{command}"
         async with self.session.post(url) as r:
+            r.raise_for_status()
+
+    async def send_general_command(
+        self,
+        session_id: str,
+        command: str,
+        arguments: Optional[dict[str, str]] = None,
+    ) -> None:
+        """Send a general command (Mute, ToggleMute, SetVolume, ...).
+
+        These live under /Command, not /Playing — Jellyfin's PlaystateCommand
+        enum doesn't include the volume/mute commands.
+        """
+        url = f"{self.base_url}/Sessions/{session_id}/Command"
+        body = {"Name": command, "Arguments": arguments or {}}
+        async with self.session.post(url, json=body) as r:
             r.raise_for_status()
 
 

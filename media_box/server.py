@@ -1,14 +1,14 @@
 import argparse
 import asyncio
 import json
-import os
-import re
 import secrets
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 from typing import Optional
 
+import anyio
 from mcp.server.fastmcp import Context, FastMCP
 
 from . import config
@@ -26,9 +26,10 @@ from .torrent_client import (
     get_client as get_torrent_client,
     shutdown as shutdown_torrent_client,
 )
-from .torrents import CATEGORY_MAP, SEARCH_DIR, search as torrent_search_fn, resolve_link as torrent_resolve_link
+from . import torrents as search_engine
+from .torrents import CATEGORY_MAP, SEARCH_DIR
 from .tvmaze import TVMazeClient
-from .mover import MEDIA_EXTENSIONS
+from .mover import MEDIA_EXTENSIONS, inspect_payload as _inspect_payload
 
 mcp = FastMCP(
     "media-box",
@@ -95,7 +96,7 @@ async def _deliver_event(data: dict, interested: dict) -> None:
             pass  # client gone; interest was already consumed
 
 
-_TERMINAL_EVENTS = {"torrent_finished"}
+_TERMINAL_EVENTS = {"torrent_finished", "torrent_dead"}
 
 
 def _on_torrent_event(event_type: str, data: dict) -> None:
@@ -126,7 +127,8 @@ async def subscribe_events(ctx: Context) -> str:
     MCP log notifications with logger="events" and a JSON payload {"event", …}.
     Event types: "torrent_healthy" (downloading with seeders), "torrent_stalled"
     (progress dried up — may recover and re-announce healthy), "torrent_finished"
-    (complete; includes "save_path"). Call this after connecting (and again
+    (complete; includes "save_path"), "torrent_dead" (downloaded nothing for
+    hours and was removed with its files). Call this after connecting (and again
     after reconnecting); repeat calls are harmless.
     """
     if mcp.settings.stateless_http:
@@ -305,31 +307,54 @@ async def jellyfin_play(session_id: str, item_id: str) -> str:
     return f"Play command sent to {device_name} but playback not confirmed after 10s. The device may not have responded."
 
 
-PLAYBACK_COMMANDS = {
-    "playpause", "pause", "unpause", "stop",
-    "nexttrack", "previoustrack",
-    "rewind", "fastforward",
-    "setvolume", "mute", "unmute", "togglemute",
+# Jellyfin splits remote control across two endpoints: playstate commands go to
+# /Sessions/{id}/Playing/{cmd}, volume/mute are general commands sent to
+# /Sessions/{id}/Command. Map lowercase input to the canonical enum name.
+PLAYSTATE_COMMANDS = {
+    c.lower(): c for c in (
+        "PlayPause", "Pause", "Unpause", "Stop", "NextTrack", "PreviousTrack",
+        "Rewind", "FastForward",
+    )
+}
+GENERAL_COMMANDS = {
+    c.lower(): c for c in (
+        "SetVolume", "VolumeUp", "VolumeDown", "Mute", "Unmute", "ToggleMute",
+    )
 }
 
 
 @mcp.tool()
-async def jellyfin_command(session_id: str, command: str) -> str:
+async def jellyfin_command(session_id: str, command: str, volume: int = -1) -> str:
     """Send a playback command to a Jellyfin device.
 
     Args:
         session_id: Target device session ID from jellyfin_devices
-        command: Playback command — one of: PlayPause, Pause, Unpause, Stop,
-                 NextTrack, PreviousTrack, Rewind, FastForward,
-                 SetVolume, Mute, Unmute, ToggleMute
+        command: One of: PlayPause, Pause, Unpause, Stop, NextTrack,
+                 PreviousTrack, Rewind, FastForward, SetVolume, VolumeUp,
+                 VolumeDown, Mute, Unmute, ToggleMute
+        volume: Volume level 0-100 — required for SetVolume, ignored otherwise
     """
-    if command.lower() not in PLAYBACK_COMMANDS:
-        return f"Unknown command '{command}'. Valid commands: {', '.join(sorted(PLAYBACK_COMMANDS))}"
+    key_ = command.strip().lower()
+    if key_ not in PLAYSTATE_COMMANDS and key_ not in GENERAL_COMMANDS:
+        valid = sorted([*PLAYSTATE_COMMANDS.values(), *GENERAL_COMMANDS.values()])
+        return f"Unknown command '{command}'. Valid commands: {', '.join(valid)}"
+
+    arguments = None
+    if key_ == "setvolume":
+        if not 0 <= volume <= 100:
+            return "Error: SetVolume needs volume between 0 and 100"
+        arguments = {"Volume": str(volume)}
 
     url, key = _jellyfin_config()
     async with JellyfinClient(url, key) as client:
-        await client.send_playback_command(session_id, command)
-    return f"Sent {command} to session {session_id[:12]}..."
+        if key_ in PLAYSTATE_COMMANDS:
+            name = PLAYSTATE_COMMANDS[key_]
+            await client.send_playback_command(session_id, name)
+        else:
+            name = GENERAL_COMMANDS[key_]
+            await client.send_general_command(session_id, name, arguments)
+    suffix = f" ({volume})" if arguments else ""
+    return f"Sent {name}{suffix} to session {session_id[:12]}..."
 
 
 # ---------------------------------------------------------------------------
@@ -349,36 +374,49 @@ def _format_eta(seconds: int) -> str:
     return f"{s}s"
 
 
-def _hash_from_magnet(magnet: str) -> Optional[str]:
-    """Extract the info hash from a magnet URI."""
-    m = re.search(r"urn:btih:([0-9a-fA-F]{40})", magnet)
-    if m:
-        return m.group(1).lower()
-    # Some magnets use base32-encoded hashes
-    m = re.search(r"urn:btih:([A-Za-z2-7]{32})", magnet)
-    if m:
-        import base64
+def _match_torrents(torrents: list[dict], query: str) -> list[dict]:
+    """Torrents matching *query*: hash-prefix matches if any, else name substring.
 
-        raw = base64.b32decode(m.group(1).upper())
-        return raw.hex()
-    return None
+    An empty query matches nothing — "" is a prefix of every hash, so it used
+    to resolve to whichever torrent came first.
+    """
+    q = query.strip().lower()
+    if not q:
+        return []
+    by_hash = [t for t in torrents if t.get("hash", "").lower().startswith(q)]
+    if by_hash:
+        return by_hash
+    return [t for t in torrents if q in t.get("name", "").lower()]
 
 
 def _find_torrent(torrents: list[dict], query: str) -> Optional[dict]:
-    q = query.lower()
-    for t in torrents:
-        if t.get("hash", "").lower().startswith(q):
-            return t
-    for t in torrents:
-        if q in t.get("name", "").lower():
-            return t
-    return None
+    matches = _match_torrents(torrents, query)
+    return matches[0] if matches else None
+
+
+def _find_unique_torrent(torrents: list[dict], query: str) -> tuple[Optional[dict], str]:
+    """For destructive operations: exactly one match, or (None, error message)."""
+    matches = _match_torrents(torrents, query)
+    if not matches:
+        return None, f"No torrent matching '{query}'"
+    if len(matches) > 1:
+        listing = "\n".join(f"  {t['hash'][:12]}  {t.get('name', '')}" for t in matches[:10])
+        return None, (
+            f"'{query}' matches {len(matches)} torrents — use a hash prefix to pick one:\n{listing}"
+        )
+    return matches[0], ""
 
 
 _DONE_STATES = {"uploading", "stalledUP", "pausedUP"}
 _ERROR_STATES = {"error", "missingFiles"}
 _NO_SEEDERS_TIMEOUT = int(config.get_env("TORRENT_STALL_TIMEOUT") or 120)
-_last_search_id: Optional[str] = None
+# Most recent search per client (keyed like event interest, by
+# clientInfo.name), so torrent_download(n) without a search_id picks from
+# the caller's own search, not whichever client searched last. Stateless
+# HTTP carries no client identity (all callers are "unknown"), so there the
+# fallback is still shared — which is why torrent_search tells the model to
+# pass search_id explicitly.
+_last_search_by_client: dict[str, str] = {}
 
 
 def _cleanup_stale_searches(max_age_secs: int = 1800) -> None:
@@ -391,14 +429,13 @@ def _cleanup_stale_searches(max_age_secs: int = 1800) -> None:
             f.unlink(missing_ok=True)
 
 
-def _save_search(search_id: str, query: str, results: list[dict]) -> None:
-    global _last_search_id
+def _save_search(search_id: str, query: str, results: list[dict], client: str = "unknown") -> None:
     SEARCH_DIR.mkdir(parents=True, exist_ok=True)
     _cleanup_stale_searches()
     (SEARCH_DIR / f"{search_id}.json").write_text(
         json.dumps({"query": query, "results": results})
     )
-    _last_search_id = search_id
+    _last_search_by_client[client] = search_id
 
 
 def _load_search(search_id: str) -> dict:
@@ -419,31 +456,41 @@ async def torrent_search(
     category: str = "",
     limit: int = 0,
     sort: str = "seeders",
+    imdb: str = "",
+    ctx: Context = None,
 ) -> str:
-    """Search for torrents across configured indexers. Returns a numbered list.
+    """Search for torrents across all configured indexers. Returns a numbered list.
     Use torrent_download with a result number to start downloading.
 
+    Duplicates across indexers are merged (the Indexer column shows "+N" when
+    several carry the same torrent). Indexers that are failing are benched
+    automatically; the status line under the table shows what each returned.
+    If results are thin, simpler query variants are tried automatically.
+    The Note column flags suspicious results (archive, executable, too small
+    for the stated resolution) — prefer clean results.
+
     Args:
-        query: Search term (e.g. "The Matrix 1999", "Breaking Bad S03")
+        query: Search term (e.g. "The Matrix 1999", "Breaking Bad S03E07", "Breaking Bad S03")
         category: Filter by category — "movies" or "tv"
         limit: Maximum number of results to return. 0 means default (50).
         sort: Sort results by "seeders" (default) or "size"
+        imdb: Optional IMDb ID (e.g. "tt0903747") for ID-based sources. For TV
+            it's looked up automatically from the show name.
     """
     cat_id = CATEGORY_MAP.get(category) if category else None
     search_limit = limit or 50
 
-    results = await torrent_search_fn(query, category=cat_id, limit=search_limit)
-
+    out = await search_engine.search(query, category=cat_id, limit=max(search_limit, 50),
+                                     imdb=imdb or None)
+    results = out.results
     results.sort(
         key=lambda r: r.get("Seeders" if sort == "seeders" else "Size", 0) or 0,
         reverse=True,
     )
-
-    if limit:
-        results = results[:limit]
+    results = results[:search_limit]
 
     search_id = secrets.token_hex(3)
-    _save_search(search_id, query, results)
+    _save_search(search_id, query, results, client=_client_name(ctx))
 
     rows = []
     for i, r in enumerate(results):
@@ -452,20 +499,34 @@ async def torrent_search(
             "title": r.get("Title", ""),
             "size": format_size(r.get("Size")),
             "seeders": str(r.get("Seeders", 0)),
-            "indexer": r.get("Tracker", ""),
+            "indexer": r.get("Tracker", "") or "",
+            "note": r.get("Note", "") or "",
         })
     table = format_table(rows, [
         ("#", "num", 4),
         ("Title", "title", 55),
         ("Size", "size", 10),
         ("S", "seeders", 5),
-        ("Indexer", "indexer", 15),
+        ("Indexer", "indexer", 18),
+        ("Note", "note", 22),
     ])
 
-    return (
-        f"{table}\n\n{len(results)} results (search id: {search_id}). "
-        f"Use torrent_download(number) to download."
-    )
+    lines = [table, ""]
+    lines.append(f"{len(results)} results (search id: {search_id}). "
+                 f"Download with torrent_download(number, search_id=\"{search_id}\").")
+    lines.append("Indexers: " + " · ".join(
+        f"{o.id} {o.summary}" + (" [probe]" if o.probe else "") for o in out.outcomes))
+    if out.variants:
+        lines.append("Also tried: " + "; ".join(out.variants))
+    searched = [o for o in out.outcomes if o.status not in ("benched", "skipped")]
+    failed = [o for o in searched if o.status not in ("ok", "empty")]
+    if searched and len(failed) * 2 >= len(searched):
+        lines.append(f"WARNING: search is degraded — {len(failed)} of {len(searched)} indexers "
+                     f"failed. Few/no results may not mean the release doesn't exist; "
+                     f"retry later or check torrent_indexers.")
+    for note in out.notes:
+        lines.append(f"Health: {note}")
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -498,12 +559,13 @@ async def torrent_download(
         timeout: Max seconds to wait for health check (default 120, i.e. 2 minutes)
         category: Category tag for organizing (e.g. "tv", "movies")
         tag: Custom tag for tracking this download
-        search_id: Search id from torrent_search output. Omit to use the most
-            recent search — only needed to pick from an older search.
+        search_id: Search id from the torrent_search output. Always pass it:
+            omitted, it falls back to your most recent search, which on a
+            stateless server may be another client's.
     """
-    sid = search_id or _last_search_id
+    sid = search_id or _last_search_by_client.get(_client_name(ctx))
     if not sid:
-        return "Error: no search results. Run torrent_search first."
+        return "Error: no search results. Run torrent_search first (and pass its search_id)."
 
     idx = number - 1
     if idx < 0:
@@ -520,26 +582,21 @@ async def torrent_download(
 
     result = results[idx]
     title = result.get("Title", "unknown")
-    magnet = result.get("MagnetUri")
-    link = result.get("Link")
-    tracker_id = result.get("TrackerId")
 
-    # Resolve download source
-    if magnet:
-        source = magnet
-    elif link:
-        try:
-            resolved = await torrent_resolve_link(link, tracker_id=tracker_id)
-        except Exception as e:
-            return f"Error resolving download for #{number}: {e}"
-        if isinstance(resolved, str):
-            source = resolved
-        else:
-            tmp_path = SEARCH_DIR / f"{sid}_{idx}.torrent"
-            tmp_path.write_bytes(resolved)
-            source = str(tmp_path)
-    else:
+    # Resolve download source — a magnet if any source has one, else each
+    # source's link in turn (a dead details page falls back to the next)
+    if not (result.get("MagnetUri") or result.get("Link") or result.get("Sources")):
         return f"Error: #{number} has no download link"
+    try:
+        resolved, _via = await search_engine.resolve_any(result)
+    except Exception as e:
+        return f"Error resolving download for #{number} (tried every source): {e}"
+    if isinstance(resolved, str):
+        source = resolved
+    else:
+        tmp_path = SEARCH_DIR / f"{sid}_{idx}.torrent"
+        tmp_path.write_bytes(resolved)
+        source = str(tmp_path)
 
     # Add to torrent client
     save_path = config.get_env("TEMP_DOWNLOAD_LOCATION", "TEMPORARY_DOWNLOAD_LOCATION")
@@ -557,97 +614,127 @@ async def torrent_download(
 
     # Monitor torrent health — wait up to timeout to see if it's viable
     timeout = min(max(timeout, 30), 300)
-    interval = 5
-    elapsed = 0
-    name = title
-    ever_had_seeders = False
-    last_status = ""
-    prev_progress = -1.0
+    payload_warning = [""]
 
-    while elapsed < timeout:
-        torrents = await client.get_torrents()
-        torrent = _find_torrent(torrents, t_hash)
-        if not torrent:
-            if elapsed < 15:
-                await asyncio.sleep(5)
-                elapsed += 5
-                continue
-            return f"ERROR: Torrent not found after adding: {name}"
+    async def _monitor() -> str:
+        payload_checked = False
+        interval = 5
+        elapsed = 0
+        name = title
+        ever_had_seeders = False
+        last_status = ""
+        prev_progress = -1.0
 
-        state = torrent.get("state", "")
-        progress = torrent.get("progress", 0)
-        dlspeed = torrent.get("dlspeed", 0)
-        eta = torrent.get("eta", 0)
-        num_seeds = torrent.get("num_seeds", 0)
-        name = torrent.get("name", name)
+        while True:
+            torrents = await client.get_torrents()
+            torrent = _find_torrent(torrents, t_hash)
+            if not torrent:
+                if elapsed < 15:
+                    await asyncio.sleep(5)
+                    elapsed += 5
+                    continue
+                return f"ERROR: Torrent not found after adding: {name}"
 
-        if num_seeds > 0:
-            ever_had_seeders = True
+            state = torrent.get("state", "")
+            progress = torrent.get("progress", 0)
+            dlspeed = torrent.get("dlspeed", 0)
+            eta = torrent.get("eta", 0)
+            num_seeds = torrent.get("num_seeds", 0)
+            name = torrent.get("name", name)
 
-        last_status = (
-            f"{format_progress(progress)}  "
-            f"{format_size(dlspeed)}/s  "
-            f"ETA {_format_eta(eta)}  "
-            f"Seeds {num_seeds}"
-        )
+            if num_seeds > 0:
+                ever_had_seeders = True
 
-        # Already finished (small/fast torrent)
-        if state in _DONE_STATES and (ever_had_seeders or progress >= 1.0):
-            save = torrent.get("save_path", save_path)
-            return (
-                f"Complete: {name} ({t_hash[:12]})\n{last_status}\n"
-                f"Save path: {save}"
+            # Once metadata arrives, look at the file list: executables or no
+            # video at all = fake/unusable -> remove now; archive-only -> warn
+            if not payload_checked:
+                files = await client.get_torrent_files(t_hash)
+                if files:
+                    payload_checked = True
+                    verdict, detail = _inspect_payload(files)
+                    if verdict == "reject":
+                        await client.delete_torrent(t_hash, delete_files=True)
+                        return (
+                            f"REJECTED (removed): {name} ({t_hash[:12]}) — {detail}. "
+                            f"Looks fake or unusable; try another search result."
+                        )
+                    if verdict == "warn":
+                        payload_warning[0] = detail
+
+            last_status = (
+                f"{format_progress(progress)}  "
+                f"{format_size(dlspeed)}/s  "
+                f"ETA {_format_eta(eta)}  "
+                f"Seeds {num_seeds}"
             )
 
-        if state in _ERROR_STATES:
-            error_detail = torrent.get("error", "")
-            error_msg = f"ERROR: {name} ({t_hash[:12]})"
-            if error_detail:
-                error_msg += f"\nReason: {error_detail}"
-            else:
-                error_msg += f"\nState: {STATE_MAP.get(state, state)}"
-            error_msg += "\nCheck save_path is writable and has enough disk space. Use torrent_logs() for more detail."
-            return error_msg
+            # Already finished (small/fast torrent)
+            if state in _DONE_STATES and (ever_had_seeders or progress >= 1.0):
+                save = torrent.get("save_path", save_path)
+                return (
+                    f"Complete: {name} ({t_hash[:12]})\n{last_status}\n"
+                    f"Save path: {save}"
+                )
 
-        # Seeders connected and progress advanced between two polls — it's
-        # demonstrably healthy, so return now instead of making the caller
-        # sit out the rest of the window.
-        if num_seeds > 0 and 0 <= prev_progress < progress:
+            if state in _ERROR_STATES:
+                error_detail = torrent.get("error", "")
+                error_msg = f"ERROR: {name} ({t_hash[:12]})"
+                if error_detail:
+                    error_msg += f"\nReason: {error_detail}"
+                else:
+                    error_msg += f"\nState: {STATE_MAP.get(state, state)}"
+                error_msg += "\nCheck save_path is writable and has enough disk space. Use torrent_logs() for more detail."
+                return error_msg
+
+            # Seeders connected and progress advanced between two polls — it's
+            # demonstrably healthy, so return now instead of making the caller
+            # sit out the rest of the window.
+            if num_seeds > 0 and 0 <= prev_progress < progress:
+                return (
+                    f"DOWNLOADING: {name} ({t_hash[:12]})\n{last_status}\n"
+                    f"Healthy — {num_seeds} seeder(s) connected and progress advancing. "
+                    f"The download continues in the background. Tell the user it's in "
+                    f"progress; check later with torrent_info or torrent_list. If they'd "
+                    f"prefer a different result, use torrent_delete to remove this one first."
+                )
+            prev_progress = progress
+
+            # No seeders after the stall timeout — dead torrent, remove it
+            if elapsed >= _NO_SEEDERS_TIMEOUT and not ever_had_seeders and progress < 1.0:
+                await client.delete_torrent(t_hash, delete_files=True)
+                return (
+                    f"DEAD TORRENT (removed): {name} — no seeders after {_NO_SEEDERS_TIMEOUT}s ({t_hash[:12]}). "
+                    f"Try the next search result, or re-search with a different indexer."
+                )
+
+            # Checks above run once more at elapsed == timeout: with the default
+            # timeout == stall timeout (120s), a `while elapsed < timeout` loop
+            # exited just before the dead-torrent check could ever fire.
+            if elapsed >= timeout:
+                break
+            await asyncio.sleep(interval)
+            elapsed += interval
+
+        # Health check window expired — torrent is alive but never proved itself
+        if ever_had_seeders:
             return (
                 f"DOWNLOADING: {name} ({t_hash[:12]})\n{last_status}\n"
-                f"Healthy — {num_seeds} seeder(s) connected and progress advancing. "
-                f"The download continues in the background. Tell the user it's in "
-                f"progress; check later with torrent_info or torrent_list. If they'd "
-                f"prefer a different result, use torrent_delete to remove this one first."
+                f"The torrent is healthy and downloading. Tell the user it's in progress "
+                f"and they can check status with torrent_info or torrent_list. "
+                f"If they'd prefer a different result, use torrent_delete to remove this one first."
             )
-        prev_progress = progress
-
-        # No seeders after the stall timeout — dead torrent, remove it
-        if elapsed >= _NO_SEEDERS_TIMEOUT and not ever_had_seeders and progress < 1.0:
-            await client.delete_torrent(t_hash, delete_files=True)
+        else:
             return (
-                f"DEAD TORRENT (removed): {name} — no seeders after {_NO_SEEDERS_TIMEOUT}s ({t_hash[:12]}). "
-                f"Try the next search result, or re-search with a different indexer."
+                f"SLOW START: {name} ({t_hash[:12]})\n{last_status}\n"
+                f"No seeders found yet but still searching. Ask the user: wait it out, "
+                f"or try the next search result? Use torrent_delete to remove if switching."
             )
 
-        await asyncio.sleep(interval)
-        elapsed += interval
 
-    # Health check window expired — torrent is alive but never proved itself
-    if ever_had_seeders:
-        return (
-            f"DOWNLOADING: {name} ({t_hash[:12]})\n{last_status}\n"
-            f"The torrent is healthy and downloading. Tell the user it's in progress "
-            f"and they can check status with torrent_info or torrent_list. "
-            f"If they'd prefer a different result, use torrent_delete to remove this one first."
-        )
-    else:
-        return (
-            f"SLOW START: {name} ({t_hash[:12]})\n{last_status}\n"
-            f"No seeders found yet but still searching. Ask the user: wait it out, "
-            f"or try the next search result? Use torrent_delete to remove if switching."
-        )
-
+    msg = await _monitor()
+    if payload_warning[0]:
+        msg += f"\nWARNING: {payload_warning[0]}"
+    return msg
 
 @mcp.tool()
 async def torrent_list(
@@ -808,9 +895,9 @@ async def torrent_delete(query: str, delete_files: bool = False) -> str:
     """
     client = _torrent_client()
     torrents = await client.get_torrents()
-    torrent = _find_torrent(torrents, query)
+    torrent, err = _find_unique_torrent(torrents, query)
     if not torrent:
-        return f"No torrent matching '{query}'"
+        return err
 
     h = torrent["hash"]
     name = torrent.get("name", h[:12])
@@ -846,7 +933,7 @@ async def torrent_wait(query: str, timeout: int = 1800) -> str:
     ever_had_seeders = False
     last_status = ""
 
-    while elapsed < timeout:
+    while True:
         torrents = await client.get_torrents()
         torrent = _find_torrent(torrents, t_hash)
         if not torrent:
@@ -889,6 +976,8 @@ async def torrent_wait(query: str, timeout: int = 1800) -> str:
                 f"Try the next search result, or re-search with a different indexer."
             )
 
+        if elapsed >= timeout:   # final check ran at elapsed == timeout
+            break
         await asyncio.sleep(interval)
         elapsed += interval
 
@@ -929,11 +1018,52 @@ async def torrent_logs(limit: int = 100) -> str:
         limit: Number of recent log entries to return (default 100)
     """
     client = _torrent_client()
-    client._process_alerts(timeout=0.5)
+    client._process_alerts()
     entries = client.get_logs(limit=limit)
     if not entries:
         return "No log entries yet."
     return "\n".join(entries)
+
+
+@mcp.tool()
+async def torrent_indexers(reset: str = "", probe: bool = False) -> str:
+    """Show torrent indexer health: which are active, benched (auto-skipped
+    after repeated failures), success rate, latency and last result.
+
+    Benched indexers come back on their own (a trial query after the
+    cooldown, plus background probes). Use this when searches look degraded.
+
+    Args:
+        reset: Indexer id to un-bench now ("all" for every indexer)
+        probe: Run a health probe of every indexer now (takes ~10-30s)
+    """
+    lines = []
+    h = search_engine.health()
+    if reset:
+        done = h.reset(None if reset == "all" else reset)
+        h.save()
+        lines.append(f"Reset: {', '.join(done) or 'nothing to reset'}")
+    if probe:
+        notes = await search_engine.run_canaries()
+        lines.append("Probe done." + ("" if not notes else " " + "; ".join(notes)))
+    await search_engine._get_pyackett()
+    ids = search_engine._indexer_ids
+    rows = h.rows(ids)
+    lines.append(format_table(rows, [
+        ("Indexer", "id", 22),
+        ("State", "state", 14),
+        ("Success", "success", 12),
+        ("Latency", "latency", 8),
+        ("Last result", "last", 34),
+    ]))
+    reasons = [f"  {r['id']}: {r['reason']}" for r in rows if r["reason"]]
+    if reasons:
+        lines.append("Bench reasons:\n" + "\n".join(reasons))
+    configured = set(search_engine.configured_indexer_ids())
+    missing = sorted(configured - set(ids))
+    if missing:
+        lines.append(f"Not loaded (unknown id or failed to configure): {', '.join(missing)}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -1169,6 +1299,20 @@ def _validate_source(source: Path) -> Optional[str]:
     return None
 
 
+def _bad_name(value: str, what: str) -> Optional[str]:
+    """Reject a library path component that could escape its folder.
+
+    dest_name / show come from the model, often derived from torrent names
+    (untrusted). Without this, "../../x.mkv" or an absolute path would write
+    outside the media library.
+    """
+    if not value or not value.strip():
+        return f"Error: {what} is empty"
+    if "/" in value or "\\" in value or value in (".", "..") or "\0" in value:
+        return f"Error: {what} must be a plain name with no path separators: {value!r}"
+    return None
+
+
 def _format_file_size(size: int) -> str:
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if size < 1024:
@@ -1185,9 +1329,10 @@ async def mover_list(path: str = "") -> str:
         path: Subfolder to list (optional, relative to temp download dir)
     """
     (temp_dir,) = config.require_env("TEMP_DOWNLOAD_LOCATION")
-    target = Path(temp_dir)
-    if path:
-        target = target / path
+    base = Path(temp_dir).resolve()
+    target = (base / path).resolve() if path else base
+    if not target.is_relative_to(base):
+        return f"Error: path must be inside the download directory: {path}"
 
     if not target.exists():
         return f"Error: path not found: {target}"
@@ -1228,9 +1373,9 @@ async def _copy_file(source: Path, dest: Path, *, force: bool = False) -> str:
 async def _cleanup_torrent(torrent_hash: str) -> str:
     client = _torrent_client()
     torrents = await client.get_torrents()
-    match = _find_torrent(torrents, torrent_hash)
+    match, err = _find_unique_torrent(torrents, torrent_hash)
     if not match:
-        return f"No torrent matching: {torrent_hash}"
+        return f"Torrent cleanup skipped — {err}"
     full_hash = match["hash"]
     await client.delete_torrent(full_hash, delete_files=True)
     return f"Deleted torrent {full_hash[:12]} and remaining files"
@@ -1256,6 +1401,9 @@ async def mover_movie(
         torrent_hash: If provided, delete this torrent and its files after moving
     """
     (movies_dir,) = config.require_env("MOVIES_SAVE_LOCATION")
+    err = _bad_name(dest_name, "dest_name")
+    if err:
+        return err
     source_path = _resolve_source(Path(source))
 
     err = _validate_source(source_path)
@@ -1298,6 +1446,9 @@ async def mover_tv(
         torrent_hash: If provided, delete this torrent and its files after moving (use on last episode only)
     """
     (tv_dir,) = config.require_env("TV_SHOWS_SAVE_LOCATION")
+    err = _bad_name(show, "show") or _bad_name(dest_name, "dest_name")
+    if err:
+        return err
     source_path = _resolve_source(Path(source))
 
     err = _validate_source(source_path)
@@ -1338,6 +1489,9 @@ async def mover_tv_batch(
         torrent_hash: If provided, delete this torrent and its files after all moves complete
     """
     (tv_dir,) = config.require_env("TV_SHOWS_SAVE_LOCATION")
+    err = _bad_name(show, "show")
+    if err:
+        return err
     season_folder = f"Season {season:02d}"
     lines: list[str] = []
     errors = 0
@@ -1347,6 +1501,11 @@ async def mover_tv_batch(
         dest_name = move.get("dest_name", "")
         if not src or not dest_name:
             lines.append(f"#{i + 1}: SKIPPED — missing source or dest_name")
+            errors += 1
+            continue
+        err = _bad_name(dest_name, "dest_name")
+        if err:
+            lines.append(f"#{i + 1}: {err}")
             errors += 1
             continue
 
@@ -1421,6 +1580,13 @@ def main():
     if transport != "stdio":
         mcp.settings.host = args.host
         mcp.settings.port = args.port
+        if args.host not in ("127.0.0.1", "localhost", "::1"):
+            # FastMCP enables DNS-rebinding protection in its constructor,
+            # based on the host it was built with (the 127.0.0.1 default) —
+            # so changing the host afterwards left a localhost-only Host
+            # allowlist in place and rejected every request addressed to the
+            # LAN IP. A non-loopback bind is reachable from the network anyway.
+            mcp.settings.transport_security = None
         if transport == "streamable-http":
             # Stateless by default: with server-side sessions, a server restart
             # invalidates every connected client's mcp-session-id and their next
@@ -1433,15 +1599,35 @@ def main():
         path = mcp.settings.streamable_http_path if transport == "streamable-http" else mcp.settings.sse_path
         print(f"media-box MCP server listening on http://{args.host}:{args.port}{path} ({transport})")
 
+    runners = {
+        "stdio": mcp.run_stdio_async,
+        "sse": mcp.run_sse_async,
+        "streamable-http": mcp.run_streamable_http_async,
+    }
+
+    async def _serve():
+        # Start the torrent client's background loop now, not on the first
+        # tool call: seeding limits, dead-torrent cleanup and completion
+        # events must work even when no client has connected since a restart.
+        _torrent_client().start_background()
+        # warm up search (definitions, indexers) and run indexer health
+        # probes / definition refreshes in the background
+        maintenance = asyncio.get_running_loop().create_task(search_engine.maintenance_loop())
+        try:
+            await runners[transport]()
+        finally:
+            maintenance.cancel()
+
     try:
-        mcp.run(transport=transport)
+        anyio.run(_serve)
     except KeyboardInterrupt:
         # uvicorn has already shut down gracefully by the time asyncio
         # re-raises the Ctrl+C — don't dump a traceback over it
         pass
     finally:
         shutdown_torrent_client()
-        print("media-box MCP server stopped, torrent state saved")
+        # stderr: on stdio transport, stdout carries JSON-RPC only
+        print("media-box MCP server stopped, torrent state saved", file=sys.stderr)
 
 
 if __name__ == "__main__":

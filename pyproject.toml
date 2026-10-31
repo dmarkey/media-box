@@ -4,18 +4,29 @@ build-backend = "hatchling.build"
 
 [project]
 name = "media-box-mcp"
-version = "0.3.4"
+version = "0.4.0"
 description = "MCP server for managing Jellyfin, built-in torrent client, torrent search (pyackett), and TVMaze"
 requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.9",
     "libtorrent>=2.0.11",
     "mcp[cli]>=1.0,<2",
-    "pyackett[cloudflare]>=0.4.0",
+    "pyackett[cloudflare]>=0.5.0",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["media_box"]
 
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.4.1",
+]
+
 [project.scripts]
 media-box-mcp = "media_box.server:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
