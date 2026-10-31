@@ -291,3 +291,54 @@ async def test_resolve_any_falls_back_across_sources(monkeypatch):
 ])
 def test_inspect_payload(names, verdict):
     assert inspect_payload([{"name": n} for n in names])[0] == verdict
+
+
+# ---------------------------------------------------------------------------
+# Regression: 2026-10-31 — 5 parallel searches waiting on serialised
+# Cloudflare solves all missed the deadline and escalated kickass/uindex
+# 15m -> 1h -> 6h within a second, although every solve then succeeded.
+# ---------------------------------------------------------------------------
+
+def test_deadline_misses_never_bench(tmp_path):
+    h = IndexerHealth(tmp_path / "h.json")
+    for _ in range(10):
+        assert h.record("kickass", "timeout", detail="no answer within 12s", soft=True, now=0) is None
+    assert h.partition(["kickass"], now=1) == (["kickass"], [], [])
+    assert h._state["kickass"]["last_status"] == "timeout"
+
+
+def test_burst_of_failures_benches_once_without_escalating(tmp_path):
+    h = IndexerHealth(tmp_path / "h.json")
+    notes = [h.record("x", "blocked", detail="HTTP 403", now=100) for _ in range(5)]
+    assert sum(1 for n in notes if n) == 1          # benched once, at the 3rd failure
+    until, _ = h.bench_info("x")
+    assert until == 100 + BENCH_STEPS[0]            # 15m, not 6h
+    # a failed trial query after the cooldown does escalate
+    h.record("x", "blocked", now=until + 1)
+    assert h.bench_info("x")[0] == until + 1 + BENCH_STEPS[1]
+
+
+def test_rate_limit_burst_benches_once(tmp_path):
+    h = IndexerHealth(tmp_path / "h.json")
+    for _ in range(4):
+        h.record("r", "rate_limited", detail="HTTP 429", now=0)
+    assert h.bench_info("r")[0] == BENCH_STEPS[0]
+
+
+async def test_pipeline_deadline_miss_is_soft(engine, monkeypatch):
+    fake = engine(lambda q, ids: {"tpb": ("ok", [rel(f"x{i}", str(i) * 40) for i in range(1, 5)])},
+                  ["tpb", "kickass"])
+    orig = fake.search_detailed
+
+    async def with_deadline_miss(query, indexer_ids=None, deadline=None, **kw):
+        rep = await orig(query, indexer_ids=indexer_ids, deadline=deadline, **kw)
+        if "kickass" in indexer_ids:
+            rep.statuses["kickass"] = IndexerSearchStatus(
+                "kickass", "timeout", message=f"no answer within {deadline:g}s")
+        return rep
+
+    fake.search_detailed = with_deadline_miss
+    for _ in range(6):
+        out = await torrents.search("x")
+    assert not out.notes
+    assert torrents.health().partition(["kickass"])[0] == ["kickass"]

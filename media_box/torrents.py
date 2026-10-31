@@ -255,7 +255,7 @@ async def search(
         if record:
             for iid, st in statuses.items():
                 note = h.record(iid, st.status, detail=_detail(st), elapsed=st.elapsed,
-                                retry_after=st.retry_after)
+                                retry_after=st.retry_after, soft=_deadline_miss(st))
                 if note:
                     outcome.notes.append(note)
         return releases, statuses
@@ -288,6 +288,11 @@ async def search(
     merged.sort(key=lambda r: r.get("Seeders") or 0, reverse=True)
     outcome.results = merged
     return outcome
+
+
+def _deadline_miss(st) -> bool:
+    """Our search deadline expired (vs the site's own request timing out)."""
+    return st.status == "timeout" and (st.message or "").startswith("no answer within")
 
 
 def _detail(st) -> str:
@@ -511,6 +516,7 @@ CANARY_QUERIES = {
     "eztv-api": {"search_term": "Succession", "imdb_id": "tt7660850"},
 }
 CANARY_FALLBACK_TERMS = ["1080p", "the"]
+CANARY_DEADLINE = 90.0
 
 
 async def run_canaries() -> list[str]:
@@ -531,15 +537,18 @@ async def run_canaries() -> list[str]:
         terms = [spec] if spec else [{"search_term": t} for t in CANARY_FALLBACK_TERMS]
         st = None
         for t in terms:
+            # long enough for a request timeout (30s) plus a Cloudflare solve
+            # queued behind others, so a probe sees the site's real outcome
             rep = await pk.search_detailed(TorznabQuery(limit=20, **t), indexer_ids=[iid],
-                                           deadline=_deadline() * 2)
+                                           deadline=CANARY_DEADLINE)
             st = rep.statuses[iid]
             if not st.ok or st.result_count:
                 break
         return iid, st
 
     for iid, st in await asyncio.gather(*(probe(i) for i in _indexer_ids)):
-        note = h.record_canary(iid, st.status, st.result_count, detail=_detail(st), elapsed=st.elapsed)
+        note = h.record_canary(iid, st.status, st.result_count, detail=_detail(st),
+                               elapsed=st.elapsed, soft=_deadline_miss(st))
         if note:
             notes.append(note)
     h.save()

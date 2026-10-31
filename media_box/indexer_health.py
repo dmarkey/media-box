@@ -77,8 +77,13 @@ class IndexerHealth:
     # -- updates ---------------------------------------------------------
 
     def record(self, iid: str, status: str, *, detail: str = "", elapsed: float = 0.0,
-               retry_after: Optional[float] = None, now: Optional[float] = None) -> Optional[str]:
-        """Record one search outcome. Returns a short note if the bench state changed."""
+               retry_after: Optional[float] = None, now: Optional[float] = None,
+               soft: bool = False) -> Optional[str]:
+        """Record one search outcome. Returns a short note if the bench state changed.
+
+        soft=True: a failure that says nothing about the site (our own search
+        deadline expired) — recorded as the last status, not counted.
+        """
         now = time.time() if now is None else now
         st = self._get(iid)
         st["last_status"], st["last_detail"] = status, detail
@@ -96,18 +101,32 @@ class IndexerHealth:
                 return f"{iid} recovered"
             return None
 
+        # Missing *our* search deadline isn't the site failing: it's often a
+        # Cloudflare solve in progress (solves are serialised, so a burst of
+        # parallel searches all queue behind one) that then succeeds in the
+        # background. A site that really hangs is caught by its own request
+        # timeout, which canary probes (longer deadline) do see.
+        if soft:
+            return None
+
         st["failed"] += 1
         st["last_fail"] = now
         st["fails"] += 1
+        if st["benched_until"] > now:
+            # Already benched: these are results of searches that started
+            # before the bench. Don't escalate — a burst of 5 parallel
+            # searches must not jump 15m -> 6h in one second.
+            return None
         if status == "rate_limited":
             return self._bench(iid, st, now, f"rate limited ({detail})", minimum=retry_after)
         if st["fails"] >= FAILS_BEFORE_BENCH or st["benched_until"]:
-            # a failed probe re-benches immediately, for longer
+            # a failed probe (bench expired, trial query failed) re-benches, for longer
             return self._bench(iid, st, now, f"{st['fails']} failures in a row, last: {status} ({detail})")
         return None
 
     def record_canary(self, iid: str, status: str, result_count: int, *, detail: str = "",
-                      elapsed: float = 0.0, now: Optional[float] = None) -> Optional[str]:
+                      elapsed: float = 0.0, now: Optional[float] = None,
+                      soft: bool = False) -> Optional[str]:
         """Record a background canary probe (a broad query that should always match)."""
         now = time.time() if now is None else now
         st = self._get(iid)
@@ -118,7 +137,7 @@ class IndexerHealth:
                 return self._bench(iid, st, now, "canary query returned nothing — definition likely broken")
             return None
         st["canary_empty"] = 0
-        return self.record(iid, status, detail=detail, elapsed=elapsed, now=now)
+        return self.record(iid, status, detail=detail, elapsed=elapsed, now=now, soft=soft)
 
     def _bench(self, iid: str, st: dict, now: float, reason: str,
                minimum: Optional[float] = None) -> str:
